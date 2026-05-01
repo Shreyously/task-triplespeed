@@ -5,6 +5,7 @@ import { packRoutes } from "./routes/packs/routes";
 import { listingRoutes } from "./routes/listings/routes";
 import { auctionRoutes } from "./routes/auctions/routes";
 import { collectionRoutes } from "./routes/collection/routes";
+import { analyticsRoutes } from "./routes/analytics/routes";
 import { errorHandler } from "./middleware/error";
 
 export function createApp() {
@@ -19,6 +20,7 @@ export function createApp() {
   app.use(listingRoutes);
   app.use(auctionRoutes);
   app.use(collectionRoutes);
+  app.use(analyticsRoutes);
   app.use(errorHandler);
   return app;
 }

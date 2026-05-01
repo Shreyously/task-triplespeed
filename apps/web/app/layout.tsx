@@ -11,6 +11,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <Link href="/collection">Collection</Link>
           <Link href="/marketplace">Marketplace</Link>
           <Link href="/auctions">Auctions</Link>
+          <Link href="/admin/analytics">Analytics</Link>
           <Link href="/auth">Auth</Link>
         </header>
         <main className="mx-auto max-w-6xl p-6">{children}</main>

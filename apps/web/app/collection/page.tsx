@@ -1,9 +1,16 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { io } from "socket.io-client";
 import { API_BASE, SOCKET_BASE, uuid } from "../../lib/config";
 import { SOCKET_EVENTS } from "@pullvault/common";
 import Link from "next/link";
+import { SortConfig, FilterConfig, SortField } from "../../lib/collectionTypes";
+import { useCollectionSort } from "../../lib/hooks/useCollectionSort";
+import { useCollectionFilter } from "../../lib/hooks/useCollectionFilter";
+import { useCollectionPersistence } from "../../lib/hooks/useCollectionPersistence";
+import { SortControls } from "../../components/collection/SortControls";
+import { FilterControls } from "../../components/collection/FilterControls";
+import { CollectionStats } from "../../components/collection/CollectionStats";
 
 type Card = {
   id: string;
@@ -13,6 +20,7 @@ type Card = {
   image_url: string;
   market_value: string;
   pnl: string;
+  created_at: string;
 };
 
 export default function CollectionPage() {
@@ -21,6 +29,13 @@ export default function CollectionPage() {
   const [msg, setMsg] = useState("");
   const [needsLogin, setNeedsLogin] = useState(false);
   const [listingPrice, setListingPrice] = useState<Record<string, string>>({});
+
+  // Sort and filter state
+  const [sortConfig, setSortConfig] = useState<SortConfig>({ field: 'created_at', direction: 'desc' });
+  const [filterConfig, setFilterConfig] = useState<FilterConfig>({ rarities: [], sets: [], valueRange: null });
+
+  // Persistence hook
+  useCollectionPersistence(sortConfig, filterConfig, setSortConfig, setFilterConfig);
 
   useEffect(() => {
     let socket: ReturnType<typeof io> | null = null;
@@ -106,6 +121,56 @@ export default function CollectionPage() {
     setMsg(res.ok ? `Auction started ${data.auction.id}` : data.error);
   }
 
+  // Apply filtering and sorting
+  const { filteredCards } = useCollectionFilter(cards, filterConfig);
+  const { sortedCards } = useCollectionSort(filteredCards, sortConfig);
+
+  // Calculate available options for filters
+  const availableRarities = useMemo(() => [...new Set(cards.map(c => c.rarity))], [cards]);
+  const availableSets = useMemo(() => [...new Set(cards.map(c => c.set_name))], [cards]);
+  const totalFilteredValue = useMemo(() =>
+    sortedCards.reduce((sum, card) => sum + Number(card.market_value), 0).toFixed(2),
+    [sortedCards]
+  );
+
+  // Event handlers for sort/filter
+  const handleSortFieldChange = (field: SortField) => {
+    setSortConfig(prev => ({ ...prev, field }));
+  };
+
+  const handleSortDirectionToggle = () => {
+    setSortConfig(prev => ({ ...prev, direction: prev.direction === 'asc' ? 'desc' : 'asc' }));
+  };
+
+  const handleRarityToggle = (rarity: string) => {
+    setFilterConfig(prev => ({
+      ...prev,
+      rarities: prev.rarities.includes(rarity)
+        ? prev.rarities.filter(r => r !== rarity)
+        : [...prev.rarities, rarity]
+    }));
+  };
+
+  const handleSetToggle = (set: string) => {
+    setFilterConfig(prev => ({
+      ...prev,
+      sets: prev.sets.includes(set)
+        ? prev.sets.filter(s => s !== set)
+        : [...prev.sets, set]
+    }));
+  };
+
+  const handleValueRangeChange = (min: number, max: number) => {
+    setFilterConfig(prev => ({
+      ...prev,
+      valueRange: min > 0 || max > 0 ? { min, max } : null
+    }));
+  };
+
+  const handleClearFilters = () => {
+    setFilterConfig({ rarities: [], sets: [], valueRange: null });
+  };
+
   return (
     <div className="space-y-4">
       <h1 className="text-3xl font-bold">Collection</h1>
@@ -121,27 +186,64 @@ export default function CollectionPage() {
         <div className="card"><p>Held</p><p className="text-xl font-semibold">${summary.heldBalance}</p></div>
         <div className="card"><p>Net Worth</p><p className="text-xl font-semibold">${summary.netWorth}</p></div>
       </div>
-      <div className="grid gap-4 md:grid-cols-2">
-        {cards.map((card) => (
-          <div className="card space-y-2" key={card.id}>
-            <img src={card.image_url} alt={card.name} className="h-40 rounded object-contain" />
-            <h2 className="text-lg font-semibold">{card.name}</h2>
-            <p>{card.set_name} - {card.rarity}</p>
-            <p>Market: ${card.market_value}</p>
-            <p className={Number(card.pnl) >= 0 ? "text-emerald-400" : "text-rose-400"}>P/L: ${card.pnl}</p>
-            <div className="flex gap-2">
-              <input
-                className="w-28 rounded bg-slate-800 px-2 py-1"
-                value={listingPrice[card.id] ?? ""}
-                onChange={(e) => setListingPrice((prev) => ({ ...prev, [card.id]: e.target.value }))}
-                placeholder="List price"
-              />
-              <button className="rounded bg-cyan-500 px-3 py-2 text-slate-900" onClick={() => listCard(card.id)}>List</button>
-              <button className="rounded bg-amber-400 px-3 py-2 text-slate-900" onClick={() => startAuction(card.id)}>Auction</button>
-            </div>
-          </div>
-        ))}
+
+      {/* Controls Section */}
+      <div className="grid gap-4 md:grid-cols-3">
+        <SortControls
+          currentSort={sortConfig}
+          onSortChange={handleSortFieldChange}
+          onDirectionToggle={handleSortDirectionToggle}
+        />
+        <FilterControls
+          currentFilter={filterConfig}
+          availableRarities={availableRarities}
+          availableSets={availableSets}
+          onRarityToggle={handleRarityToggle}
+          onSetToggle={handleSetToggle}
+          onValueRangeChange={handleValueRangeChange}
+          onClearFilters={handleClearFilters}
+        />
+        <CollectionStats
+          totalCards={cards.length}
+          filteredCards={sortedCards.length}
+          totalValue={totalFilteredValue}
+        />
       </div>
+
+      {/* Cards Grid */}
+      {sortedCards.length === 0 ? (
+        <div className="card">
+          <p>No cards match your current filters.</p>
+          <button
+            className="mt-2 rounded bg-cyan-500 px-3 py-2 text-slate-900"
+            onClick={handleClearFilters}
+          >
+            Clear Filters
+          </button>
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          {sortedCards.map((card) => (
+            <div className="card space-y-2" key={card.id}>
+              <img src={card.image_url} alt={card.name} className="h-40 rounded object-contain" />
+              <h2 className="text-lg font-semibold">{card.name}</h2>
+              <p>{card.set_name} - {card.rarity}</p>
+              <p>Market: ${card.market_value}</p>
+              <p className={Number(card.pnl) >= 0 ? "text-emerald-400" : "text-rose-400"}>P/L: ${card.pnl}</p>
+              <div className="flex gap-2">
+                <input
+                  className="w-28 rounded bg-slate-800 px-2 py-1"
+                  value={listingPrice[card.id] ?? ""}
+                  onChange={(e) => setListingPrice((prev) => ({ ...prev, [card.id]: e.target.value }))}
+                  placeholder="List price"
+                />
+                <button className="rounded bg-cyan-500 px-3 py-2 text-slate-900" onClick={() => listCard(card.id)}>List</button>
+                <button className="rounded bg-amber-400 px-3 py-2 text-slate-900" onClick={() => startAuction(card.id)}>Auction</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

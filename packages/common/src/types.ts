@@ -12,3 +12,47 @@ export interface JwtUser {
   userId: string;
   email: string;
 }
+
+// Analytics types
+export interface RevenueBreakdown {
+  packRevenue: string;
+  tradeFees: string;
+  auctionFees: string;
+  totalRevenue: string;
+}
+
+export interface PackEVAnalysis {
+  tier: string;
+  price: number;
+  cardsPerPack: number;
+  expectedValue: string;
+  margin: string;
+  marginPercentage: number;
+  rarityBreakdown: Array<{
+    rarity: string;
+    weight: number;
+    avgMarketValue: string;
+    contribution: string;
+  }>;
+}
+
+export interface TransactionVolumes {
+  trades: { count: number; totalVolume: string };
+  auctions: { count: number; totalVolume: string };
+  packs: { count: number; totalVolume: string };
+}
+
+export interface PlatformProfitability {
+  totalRevenue: string;
+  totalCosts: string;
+  grossProfit: string;
+  profitMargin: number;
+}
+
+export interface MarketStats {
+  rarity: string;
+  avgValue: string;
+  minValue: string;
+  maxValue: string;
+  cardCount: number;
+}

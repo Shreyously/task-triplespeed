@@ -10,7 +10,7 @@ export async function bootstrapSchema() {
     await client.query(schema);
     await client.query(
       "insert into users(id,email,password_hash) values($1,$2,$3) on conflict (id) do nothing",
-      [config.platformUserId, "platform@pullvault.local", "platform"]
+      [config.platformUserId, "platform@pullvault.local", "$2a$10$rrWpfKt.dm1f2zDRS/8Tte5CeOclby5YnA5W.pWjfEK/q3IC9aNGm"]
     );
     await client.query(
       "insert into balances(user_id,available_balance,held_balance,total_balance) values($1,0,0,0) on conflict (user_id) do nothing",
