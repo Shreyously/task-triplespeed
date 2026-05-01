@@ -1,0 +1,109 @@
+import Decimal from "decimal.js";
+import { pool, withTx } from "../db/pool";
+import { getDropForUpdate, listDrops } from "../repositories/dropRepository";
+import { createPackPurchase, getPurchaseById } from "../repositories/packRepository";
+import { createCard, getCardsByPurchase } from "../repositories/cardRepository";
+import { createLedger } from "../repositories/ledgerRepository";
+import { debitAvailable } from "./balanceService";
+import { getCardPool } from "./pokemonCardService";
+import { priceForRarity } from "./priceEngineService";
+
+function weightedPick(weights: Record<string, number>): string {
+  const entries = Object.entries(weights);
+  const total = entries.reduce((acc, [, weight]) => acc + Number(weight), 0);
+  let roll = Math.random() * total;
+  for (const [rarity, weight] of entries) {
+    roll -= Number(weight);
+    if (roll <= 0) return rarity;
+  }
+  return entries[entries.length - 1]?.[0] ?? "Common";
+}
+
+function pickCards(count: number, pool: Array<{ name: string; setName: string; rarity: string; imageUrl: string }>, rarityWeights: Record<string, number>) {
+  const byRarity = pool.reduce<Record<string, Array<{ name: string; setName: string; rarity: string; imageUrl: string }>>>((acc, card) => {
+    const key = card.rarity || "Common";
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(card);
+    return acc;
+  }, {});
+  return Array.from({ length: count }, () => {
+    const desired = weightedPick(rarityWeights);
+    const candidates = byRarity[desired] ?? byRarity.Common ?? pool;
+    return candidates[Math.floor(Math.random() * candidates.length)];
+  });
+}
+
+export async function getDrops() {
+  const client = await pool.connect();
+  try {
+    return await listDrops(client);
+  } finally {
+    client.release();
+  }
+}
+
+export async function buyPack(userId: string, dropId: string, idempotencyKey: string) {
+  const cardPool = await getCardPool();
+  if (!cardPool.length) throw new Error("Card pool unavailable");
+  return withTx(async (client) => {
+    const drop = await getDropForUpdate(client, dropId);
+    if (!drop) throw new Error("Drop not found");
+    const now = new Date();
+    if (new Date(drop.starts_at) > now) throw new Error("Drop not live yet");
+    if (new Date(drop.ends_at) < now) throw new Error("Drop closed");
+    if (drop.inventory <= 0) throw new Error("Sold out");
+
+    const price = new Decimal(drop.price);
+    await debitAvailable(client, userId, price);
+    const invResult = await client.query("update drops set inventory=inventory-1 where id=$1 returning inventory", [dropId]);
+    const purchase = await createPackPurchase(client, userId, dropId, price.toFixed(2), idempotencyKey);
+
+    const cards = pickCards(Number(drop.cards_per_pack), cardPool, drop.rarity_weights ?? { Common: 1 });
+    for (const card of cards) {
+      const marketValue = priceForRarity(card.rarity).toFixed(2);
+      await createCard(client, {
+        purchaseId: purchase.id,
+        ownerId: userId,
+        name: card.name,
+        setName: card.setName,
+        rarity: card.rarity,
+        imageUrl: card.imageUrl,
+        marketValue,
+        acquisitionValue: marketValue
+      });
+    }
+
+    await createLedger(client, userId, "PACK_PURCHASE", price.negated().toFixed(2), purchase.id);
+    return { purchase, remainingInventory: Number(invResult.rows[0].inventory) };
+  });
+}
+
+export async function revealPack(userId: string, purchaseId: string) {
+  const client = await pool.connect();
+  try {
+    const purchase = await getPurchaseById(client, purchaseId, userId);
+    if (!purchase) throw new Error("Purchase not found");
+    const cards = await getCardsByPurchase(client, purchaseId) as Array<Record<string, string>>;
+    const revealOrder = [...cards].sort((a, b) => {
+      const rank: Record<string, number> = {
+        Common: 1,
+        Uncommon: 2,
+        Rare: 3,
+        "Holo Rare": 4,
+        "Ultra Rare/EX/GX": 5,
+        "Secret Rare": 6
+      };
+      return (rank[a.rarity] ?? 1) - (rank[b.rarity] ?? 1);
+    });
+    const totalValue = cards.reduce((acc: Decimal, c: Record<string, string>) => acc.plus(c.market_value), new Decimal(0));
+    const paid = new Decimal(purchase.price_paid);
+    return {
+      purchase,
+      cards: revealOrder,
+      totalValue: totalValue.toFixed(2),
+      pnl: totalValue.minus(paid).toFixed(2)
+    };
+  } finally {
+    client.release();
+  }
+}

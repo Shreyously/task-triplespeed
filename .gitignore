@@ -1,0 +1,44 @@
+﻿node_modules
+dist
+.next
+.env
+.env.local
+coverage
+
+ # Logs
+  *.log
+  npm-debug.log*
+  yarn-debug.log*
+  yarn-error.log*
+  pnpm-debug.log*
+
+  # OS files
+  .DS_Store
+  Thumbs.db
+  *.swp
+  *.swo
+
+  # IDE/Editor files
+  .vscode/
+  .idea/
+  *.sublime-project
+  *.sublime-workspace
+
+  # Temporary files
+  *.tmp
+  .cache/
+  temp/
+
+  # Build artifacts (additions)
+  *.tsbuildinfo
+  build/
+  out/
+
+  # Testing
+  .vitest/
+  playwright-report/
+
+  # Misc
+  .turbo/
+  .vercel/
+  .env*.local

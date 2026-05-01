@@ -1,0 +1,27 @@
+
+> @pullvault/server@1.0.0 dev
+> tsx watch src/index.ts
+
+node:events:502
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: listen EADDRINUSE: address already in use :::4000
+    at Server.setupListenHandle [as _listen2] (node:net:1912:16)
+    at listenInCluster (node:net:1969:12)
+    at Server.listen (node:net:2074:7)
+    at <anonymous> (C:\Users\ghodk\Desktop\task-triplespeed\apps\server\src\index.ts:12:8)
+    at ModuleJob.run (node:internal/modules/esm/module_job:271:25)
+    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:547:26)
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:116:5)
+Emitted 'error' event on Server instance at:
+    at emitErrorNT (node:net:1948:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+  code: 'EADDRINUSE',
+  errno: -4091,
+  syscall: 'listen',
+  address: '::',
+  port: 4000
+}
+
+Node.js v22.12.0

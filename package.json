@@ -1,0 +1,14 @@
+{
+  "name": "pullvault",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w @pullvault/server\" \"npm run dev -w @pullvault/web\"",
+    "build": "npm run build -w @pullvault/common && npm run build -w @pullvault/server && npm run build -w @pullvault/web",
+    "test": "npm run test -w @pullvault/server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1",
+    "typescript": "^5.6.3"
+  }
+}
