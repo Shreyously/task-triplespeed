@@ -3,6 +3,7 @@ import { useEffect, useState, useMemo } from "react";
 import { io } from "socket.io-client";
 import { API_BASE, SOCKET_BASE, uuid } from "../../lib/config";
 import { SOCKET_EVENTS } from "@pullvault/common";
+import { FEES } from "@pullvault/common";
 import Link from "next/link";
 import { SortConfig, FilterConfig, SortField } from "../../lib/collectionTypes";
 import { useCollectionSort } from "../../lib/hooks/useCollectionSort";
@@ -14,11 +15,9 @@ import { FilterControls } from "../../components/collection/FilterControls";
 function errorToMessage(error: unknown, fallback = "Something went wrong") {
   if (typeof error === "string") return error;
   if (!error || typeof error !== "object") return fallback;
-
   const maybe = error as { formErrors?: unknown; fieldErrors?: Record<string, unknown> };
   const form = Array.isArray(maybe.formErrors) ? maybe.formErrors.find((v) => typeof v === "string") : undefined;
   if (typeof form === "string" && form) return form;
-
   if (maybe.fieldErrors && typeof maybe.fieldErrors === "object") {
     for (const value of Object.values(maybe.fieldErrors)) {
       if (Array.isArray(value)) {
@@ -27,23 +26,9 @@ function errorToMessage(error: unknown, fallback = "Something went wrong") {
       }
     }
   }
-
   return fallback;
 }
-type Card = {
-  id: string;
-  name: string;
-  set_name: string;
-  rarity: string;
-  image_url: string;
-  market_value: string;
-  acquisition_value: string;
-  pnl: string;
-  created_at: string;
-  market_state?: string;
-  listing_id?: string;
-  auction_id?: string;
-};
+type Card = { id: string; name: string; set_name: string; rarity: string; image_url: string; market_value: string; acquisition_value: string; pnl: string; created_at: string; market_state?: string; listing_id?: string; auction_id?: string };
 
 export default function CollectionPage() {
   const [cards, setCards] = useState<Card[]>([]);
@@ -51,12 +36,11 @@ export default function CollectionPage() {
   const [msg, setMsg] = useState("");
   const [needsLogin, setNeedsLogin] = useState(false);
   const [listingPrice, setListingPrice] = useState<Record<string, string>>({});
-
-  // Sort and filter state
-  const [sortConfig, setSortConfig] = useState<SortConfig>({ field: 'created_at', direction: 'desc' });
+  const [sortConfig, setSortConfig] = useState<SortConfig>({ field: "created_at", direction: "desc" });
   const [filterConfig, setFilterConfig] = useState<FilterConfig>({ rarities: [], sets: [], valueRange: null });
+  const [listingCardId, setListingCardId] = useState("");
+  const [auctioningCardId, setAuctioningCardId] = useState("");
 
-  // Persistence hook
   useCollectionPersistence(sortConfig, filterConfig, setSortConfig, setFilterConfig);
 
   useEffect(() => {
@@ -97,291 +81,157 @@ export default function CollectionPage() {
       socket.emit(SOCKET_EVENTS.JOIN_USER, meData?.user?.userId);
       socket.on(SOCKET_EVENTS.PORTFOLIO_UPDATED, (event) => {
         setSummary((prev) => ({ ...prev, cardsValue: event.portfolioValue, netWorth: (Number(event.portfolioValue) + Number(prev.availableBalance) + Number(prev.heldBalance)).toFixed(2) }));
-
         if (event.cards && Array.isArray(event.cards)) {
           setCards((prevCards) => prevCards.map((card) => {
             const updated = event.cards.find((c: any) => c.id === card.id);
-            if (updated) {
-              const pnl = Number(updated.marketValue) - Number(updated.acquisitionValue);
-              return {
-                ...card,
-                market_value: updated.marketValue,
-                pnl: pnl.toFixed(2)
-              };
-            }
+            if (updated) return { ...card, market_value: updated.marketValue, pnl: (Number(updated.marketValue) - Number(updated.acquisitionValue)).toFixed(2) };
             return card;
           }));
         }
       });
-
       socket.on(SOCKET_EVENTS.PRICE_CARD_UPDATED, (payload: any) => {
         if (payload.cards && Array.isArray(payload.cards)) {
           setCards((prevCards) => prevCards.map((card) => {
             const updated = payload.cards.find((u: any) => u.id === card.id);
-            if (updated) {
-              const pnl = Number(updated.value) - Number(card.acquisition_value);
-              return {
-                ...card,
-                market_value: updated.value,
-                pnl: pnl.toFixed(2)
-              };
-            }
+            if (updated) return { ...card, market_value: updated.value, pnl: (Number(updated.value) - Number(card.acquisition_value)).toFixed(2) };
             return card;
           }));
         }
       });
-
       socket.on(SOCKET_EVENTS.LISTING_CREATED, (payload: any) => {
-        if (payload.seller_id === meData?.user?.userId) {
-          setCards((prevCards) => prevCards.map((card) => {
-            if (card.id === payload.cardId) {
-              return {
-                ...card,
-                market_state: "LISTED",
-                listing_id: payload.id
-              };
-            }
-            return card;
-          }));
-        }
+        if (payload.seller_id === meData?.user?.userId) setCards((prevCards) => prevCards.map((card) => card.id === payload.cardId ? { ...card, market_state: "LISTED", listing_id: payload.id } : card));
       });
-
       socket.on(SOCKET_EVENTS.AUCTION_UPDATED, (payload: any) => {
-        if (payload.sellerId === meData?.user?.userId && payload.status === "ACTIVE") {
-          setCards((prevCards) => prevCards.map((card) => {
-            if (card.id === payload.cardId) {
-              return {
-                ...card,
-                market_state: "IN_AUCTION",
-                auction_id: payload.auctionId
-              };
-            }
-            return card;
-          }));
-        }
+        if (payload.sellerId === meData?.user?.userId && payload.status === "ACTIVE") setCards((prevCards) => prevCards.map((card) => card.id === payload.cardId ? { ...card, market_state: "IN_AUCTION", auction_id: payload.auctionId } : card));
       });
-
       socket.on(SOCKET_EVENTS.AUCTION_CLOSED, (payload: any) => {
         if (payload.sellerId === meData?.user?.userId) {
           if (payload.settlement?.winner_id) {
-            // Remove sold card by auction id because close payload does not include card id.
             setCards((prevCards) => prevCards.filter((card) => card.auction_id !== payload.auctionId));
-            setMsg(`🎵 Your auction sold for $${payload.settlement.gross_amount}! Check your available balance.`);
+            setMsg(`Your auction sold for $${payload.settlement.gross_amount}! Check your available balance.`);
           } else {
-            // Auction ended without bids, card is available again
-            setCards((prevCards) => prevCards.map((card) => {
-              if (card.auction_id === payload.auctionId) {
-                return {
-                  ...card,
-                  market_state: "NONE",
-                  auction_id: undefined
-                };
-              }
-              return card;
-            }));
+            setCards((prevCards) => prevCards.map((card) => card.auction_id === payload.auctionId ? { ...card, market_state: "NONE", auction_id: undefined } : card));
           }
         }
       });
-
       socket.on(SOCKET_EVENTS.LISTING_SOLD, (payload) => {
         if (payload.sellerId === meData?.user?.userId) {
-          setMsg(`💰 Your ${payload.cardName} sold for $${payload.price}! Check your available balance.`);
-          // Remove the sold card from the collection
+          setMsg(`Your ${payload.cardName} sold for $${payload.price}! Check your available balance.`);
           setCards((prevCards) => prevCards.filter((card) => card.id !== payload.cardId));
         }
       });
     })().catch(() => setMsg("Failed to load collection"));
-    return () => {
-      socket?.disconnect();
-    };
+    return () => socket?.disconnect();
   }, []);
 
   async function listCard(cardId: string) {
+    setListingCardId(cardId);
     const token = localStorage.getItem("token") || "";
     const price = listingPrice[cardId];
     if (!price || Number(price) <= 0) {
       setMsg("Please enter a valid price greater than $0.00");
       setTimeout(() => setMsg(""), 3000);
+      setListingCardId("");
       return;
     }
-    const res = await fetch(`${API_BASE}/listings`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify({ cardId, price })
-    });
+    const res = await fetch(`${API_BASE}/listings`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ cardId, price }) });
     const data = await res.json();
     setMsg(res.ok ? `Listed card ${data.listing.id}` : errorToMessage(data?.error, "Failed to list card"));
+    setListingCardId("");
   }
 
   async function startAuction(cardId: string) {
+    setAuctioningCardId(cardId);
     const token = localStorage.getItem("token") || "";
-    const res = await fetch(`${API_BASE}/auctions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify({ cardId, durationSeconds: 300, idempotencyKey: uuid() })
-    });
+    const res = await fetch(`${API_BASE}/auctions`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ cardId, durationSeconds: 300, idempotencyKey: uuid() }) });
     const data = await res.json();
     setMsg(res.ok ? `Auction started ${data.auction.id}` : errorToMessage(data?.error, "Failed to start auction"));
+    setAuctioningCardId("");
   }
 
-  // Apply filtering and sorting
   const { filteredCards } = useCollectionFilter(cards, filterConfig);
   const { sortedCards } = useCollectionSort(filteredCards, sortConfig);
+  const availableRarities = useMemo(() => [...new Set(cards.map((c) => c.rarity))], [cards]);
+  const availableSets = useMemo(() => [...new Set(cards.map((c) => c.set_name))], [cards]);
+  const totalFilteredValue = useMemo(() => sortedCards.reduce((sum, card) => sum + Number(card.market_value), 0).toFixed(2), [sortedCards]);
 
-  // Calculate available options for filters
-  const availableRarities = useMemo(() => [...new Set(cards.map(c => c.rarity))], [cards]);
-  const availableSets = useMemo(() => [...new Set(cards.map(c => c.set_name))], [cards]);
-  const totalFilteredValue = useMemo(() =>
-    sortedCards.reduce((sum, card) => sum + Number(card.market_value), 0).toFixed(2),
-    [sortedCards]
-  );
-
-  // Helper function to render market status badge
   const renderMarketBadge = (card: Card) => {
-    if (card.market_state === "LISTED") {
-      return (
-        <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-400 ring-1 ring-inset ring-emerald-500/20">
-          Listed
-        </span>
-      );
-    }
-    if (card.market_state === "IN_AUCTION") {
-      return (
-        <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-400 ring-1 ring-inset ring-amber-500/20">
-          In Auction
-        </span>
-      );
-    }
+    if (card.market_state === "LISTED") return <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-400 ring-1 ring-inset ring-emerald-500/20">Listed</span>;
+    if (card.market_state === "IN_AUCTION") return <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-400 ring-1 ring-inset ring-amber-500/20">In Auction</span>;
     return null;
   };
 
-  // Event handlers for sort/filter
-  const handleSortFieldChange = (field: SortField) => {
-    setSortConfig(prev => ({ ...prev, field }));
-  };
-
-  const handleSortDirectionToggle = () => {
-    setSortConfig(prev => ({ ...prev, direction: prev.direction === 'asc' ? 'desc' : 'asc' }));
-  };
-
-  const handleRarityToggle = (rarity: string) => {
-    setFilterConfig(prev => ({
-      ...prev,
-      rarities: prev.rarities.includes(rarity)
-        ? prev.rarities.filter(r => r !== rarity)
-        : [...prev.rarities, rarity]
-    }));
-  };
-
-  const handleSetToggle = (set: string) => {
-    setFilterConfig(prev => ({
-      ...prev,
-      sets: prev.sets.includes(set)
-        ? prev.sets.filter(s => s !== set)
-        : [...prev.sets, set]
-    }));
-  };
-
-  const handleValueRangeChange = (min: number, max: number) => {
-    setFilterConfig(prev => ({
-      ...prev,
-      valueRange: min > 0 || max > 0 ? { min, max } : null
-    }));
-  };
-
-  const handleClearFilters = () => {
-    setFilterConfig({ rarities: [], sets: [], valueRange: null });
-  };
+  const handleSortFieldChange = (field: SortField) => setSortConfig((prev) => ({ ...prev, field }));
+  const handleSortDirectionToggle = () => setSortConfig((prev) => ({ ...prev, direction: prev.direction === "asc" ? "desc" : "asc" }));
+  const handleRarityToggle = (rarity: string) => setFilterConfig((prev) => ({ ...prev, rarities: prev.rarities.includes(rarity) ? prev.rarities.filter((r) => r !== rarity) : [...prev.rarities, rarity] }));
+  const handleSetToggle = (set: string) => setFilterConfig((prev) => ({ ...prev, sets: prev.sets.includes(set) ? prev.sets.filter((s) => s !== set) : [...prev.sets, set] }));
+  const handleValueRangeChange = (min: number, max: number) => setFilterConfig((prev) => ({ ...prev, valueRange: min > 0 || max > 0 ? { min, max } : null }));
+  const handleClearFilters = () => setFilterConfig({ rarities: [], sets: [], valueRange: null });
 
   return (
-    <div className="space-y-4">
-      <h1 className="text-3xl font-bold">Collection</h1>
-      {msg && <p>{msg}</p>}
-      {needsLogin && (
-        <Link href="/auth" className="inline-block rounded bg-cyan-500 px-3 py-2 text-slate-900">
-          Go to Login
-        </Link>
-      )}
-      <div className="grid gap-3 md:grid-cols-4">
-        <div className="card"><p>Cards Value</p><p className="text-xl font-semibold">${summary.cardsValue}</p></div>
-        <div className="card"><p>Available</p><p className="text-xl font-semibold">${summary.availableBalance}</p></div>
-        <div className="card"><p>Held</p><p className="text-xl font-semibold">${summary.heldBalance}</p></div>
-        <div className="card"><p>Net Worth</p><p className="text-xl font-semibold">${summary.netWorth}</p></div>
-      </div>
+    <div className="page-stack">
+      <h1 className="fluid-title">Collection</h1>
+      {msg && <p className="safe-break text-sm sm:text-base">{msg}</p>}
+      {needsLogin && <Link href="/auth" className="touch-btn inline-flex bg-cyan-500 text-slate-900">Go to Login</Link>}
+      {!needsLogin && (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="card"><p>Cards Value</p><p className="text-xl font-semibold sm:text-2xl">${summary.cardsValue}</p></div>
+            <div className="card"><p>Available</p><p className="text-xl font-semibold sm:text-2xl">${summary.availableBalance}</p></div>
+            <div className="card"><p>Held</p><p className="text-xl font-semibold sm:text-2xl">${summary.heldBalance}</p></div>
+            <div className="card"><p>Net Worth</p><p className="text-xl font-semibold sm:text-2xl">${summary.netWorth}</p></div>
+          </div>
 
-      {/* Controls Section */}
-      <div className="grid gap-4 md:grid-cols-2">
-        <SortControls
-          currentSort={sortConfig}
-          onSortChange={handleSortFieldChange}
-          onDirectionToggle={handleSortDirectionToggle}
-        />
-        <FilterControls
-          currentFilter={filterConfig}
-          availableRarities={availableRarities}
-          availableSets={availableSets}
-          onRarityToggle={handleRarityToggle}
-          onSetToggle={handleSetToggle}
-          onValueRangeChange={handleValueRangeChange}
-          onClearFilters={handleClearFilters}
-        />
-      </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <SortControls currentSort={sortConfig} onSortChange={handleSortFieldChange} onDirectionToggle={handleSortDirectionToggle} />
+            <FilterControls currentFilter={filterConfig} availableRarities={availableRarities} availableSets={availableSets} onRarityToggle={handleRarityToggle} onSetToggle={handleSetToggle} onValueRangeChange={handleValueRangeChange} onClearFilters={handleClearFilters} />
+          </div>
 
-      {/* Cards Grid */}
-      <div className="flex items-center justify-between mt-4">
-        <h2 className="text-xl font-semibold">Your Cards</h2>
-        <p className="text-sm text-slate-400">Showing {sortedCards.length} of {cards.length} cards</p>
-      </div>
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold sm:text-xl">Your Cards</h2>
+            <p className="text-sm text-slate-400">Showing {sortedCards.length} of {cards.length} cards (${totalFilteredValue})</p>
+          </div>
 
-      {sortedCards.length === 0 ? (
-        <div className="card">
-          <p>No cards match your current filters.</p>
-          <button
-            className="mt-2 rounded bg-cyan-500 px-3 py-2 text-slate-900"
-            onClick={handleClearFilters}
-          >
-            Clear Filters
-          </button>
-        </div>
-      ) : (
-        <div className="grid gap-4 md:grid-cols-2">
-          {sortedCards.map((card) => (
-            <div className="card space-y-2" key={card.id}>
-              <div className="flex items-start justify-between">
-                <img src={card.image_url} alt={card.name} className="h-40 rounded object-contain" />
-                <div className="flex flex-col gap-1">
-                  {renderMarketBadge(card)}
-                </div>
-              </div>
-              <h2 className="text-lg font-semibold">{card.name}</h2>
-              <p>{card.set_name} - {card.rarity}</p>
-              <p>Market: ${card.market_value}</p>
-              <p className={Number(card.pnl) >= 0 ? "text-emerald-400" : "text-rose-400"}>P/L: ${card.pnl}</p>
-              {card.market_state === "NONE" || !card.market_state ? (
-                <div className="flex gap-2">
-                  <input
-                    className="w-28 rounded bg-slate-800 px-2 py-1"
-                    value={listingPrice[card.id] ?? ""}
-                    onChange={(e) => setListingPrice((prev) => ({ ...prev, [card.id]: e.target.value }))}
-                    placeholder="List price"
-                  />
-                  <button
-                    className="rounded bg-cyan-500 px-3 py-2 text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed"
-                    onClick={() => listCard(card.id)}
-                    disabled={!listingPrice[card.id] || Number(listingPrice[card.id]) <= 0}
-                  >
-                    List
-                  </button>
-                  <button className="rounded bg-amber-400 px-3 py-2 text-slate-900" onClick={() => startAuction(card.id)}>Auction</button>
-                </div>
-              ) : (
-                <p className="text-sm text-slate-400">
-                  {card.market_state === "LISTED" ? "Card is listed in marketplace" : "Card is in auction"}
-                </p>
-              )}
+          {sortedCards.length === 0 ? (
+            <div className="card">
+              <p>No cards match your current filters.</p>
+              <button className="touch-btn mt-2 bg-cyan-500 text-slate-900" onClick={handleClearFilters}>Clear Filters</button>
             </div>
-          ))}
-        </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2">
+              {sortedCards.map((card) => (
+                <div className="card space-y-2" key={card.id}>
+                  <div className="flex items-start justify-between gap-3">
+                    <img src={card.image_url} alt={card.name} className="safe-media h-36 w-36 rounded sm:h-40 sm:w-40" />
+                    <div className="flex flex-col gap-1">{renderMarketBadge(card)}</div>
+                  </div>
+                  <h2 className="safe-break text-lg font-semibold">{card.name}</h2>
+                  <p className="safe-break">{card.set_name} - {card.rarity}</p>
+                  <p>Market: ${card.market_value}</p>
+                  <p className={Number(card.pnl) >= 0 ? "text-emerald-400" : "text-rose-400"}>P/L: ${card.pnl}</p>
+                  {card.market_state === "NONE" || !card.market_state ? (
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap gap-2">
+                        <input className="touch-input w-full sm:w-36" value={listingPrice[card.id] ?? ""} onChange={(e) => setListingPrice((prev) => ({ ...prev, [card.id]: e.target.value }))} placeholder="List price" />
+                        <button className="touch-btn w-full bg-cyan-500 text-slate-900 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto" onClick={() => listCard(card.id)} disabled={!listingPrice[card.id] || Number(listingPrice[card.id]) <= 0 || listingCardId === card.id}>
+                          {listingCardId === card.id ? "Listing..." : "List"}
+                        </button>
+                        <button className="touch-btn w-full bg-amber-400 text-slate-900 disabled:opacity-60 sm:w-auto" onClick={() => startAuction(card.id)} disabled={auctioningCardId === card.id}>
+                          {auctioningCardId === card.id ? "Starting..." : "Auction"}
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-400">
+                        Sale fees: Marketplace {(FEES.TRADE_FEE_RATE * 100).toFixed(0)}%, Auction {(FEES.AUCTION_FEE_RATE * 100).toFixed(0)}% (charged only if sold).
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-400">{card.market_state === "LISTED" ? "Card is listed in marketplace" : "Card is in auction"}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

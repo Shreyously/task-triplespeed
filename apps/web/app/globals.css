@@ -1,7 +1,33 @@
-﻿@tailwind base;
+@tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root { color-scheme: light; }
 body { @apply bg-slate-950 text-slate-100; }
 .card { @apply rounded-xl border border-slate-700 bg-slate-900 p-4; }
+
+@layer utilities {
+  .page-stack { @apply space-y-4 sm:space-y-5; }
+  .fluid-title { @apply text-2xl font-bold sm:text-3xl; }
+  .safe-media { @apply h-auto max-w-full object-contain; }
+  .safe-break { overflow-wrap: anywhere; word-break: break-word; }
+  .touch-input { @apply min-h-10 rounded bg-slate-800 px-3 py-2; }
+  .touch-btn { @apply min-h-10 rounded px-3 py-2 font-medium; }
+  .reveal-card-enter { animation: reveal-card-enter 460ms cubic-bezier(.2,.7,.2,1); transform-origin: center; will-change: transform, opacity; }
+  .reveal-summary-enter { animation: reveal-summary-enter 220ms ease-out; }
+}
+
+@keyframes reveal-card-enter {
+  0% { opacity: 0; transform: perspective(900px) rotateY(-14deg) rotateX(4deg) translateY(8px) scale(0.93); }
+  100% { opacity: 1; transform: perspective(900px) rotateY(0deg) scale(1); }
+}
+
+@keyframes reveal-summary-enter {
+  0% { opacity: 0; transform: translateY(6px) scale(0.99); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal-card-enter,
+  .reveal-summary-enter { animation: none; }
+}

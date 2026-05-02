@@ -6,12 +6,56 @@ import Link from "next/link";
 import { SOCKET_EVENTS } from "@pullvault/common";
 
 type Drop = { id: string; tier: string; price: string; inventory: number; starts_at: string; ends_at: string };
+const RECENT_UNOPENED_PACK_IDS_KEY = "recent-unopened-pack-ids";
+const TIER_ORDER: Record<string, number> = { BASIC: 0, PRO: 1, ELITE: 2 };
 
 export default function HomePage() {
   const [drops, setDrops] = useState<Drop[]>([]);
   const [msg, setMsg] = useState("");
   const [serverTime, setServerTime] = useState<string>(new Date().toISOString());
-  const [lastPurchaseId, setLastPurchaseId] = useState<string>("");
+  const [buyingDropId, setBuyingDropId] = useState<string>("");
+  const [recentUnopenedPackIds, setRecentUnopenedPackIds] = useState<string[]>([]);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+
+  useEffect(() => {
+    const checkAuth = () => setIsAuthenticated(!!localStorage.getItem("token"));
+    checkAuth();
+    window.addEventListener("storage", checkAuth);
+    window.addEventListener("auth-change", checkAuth);
+    return () => {
+      window.removeEventListener("storage", checkAuth);
+      window.removeEventListener("auth-change", checkAuth);
+    };
+  }, []);
+
+  useEffect(() => {
+    const raw = localStorage.getItem(RECENT_UNOPENED_PACK_IDS_KEY);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setRecentUnopenedPackIds(parsed.filter((v) => typeof v === "string"));
+      }
+    } catch {
+      setRecentUnopenedPackIds([]);
+    }
+  }, []);
+
+  function addUnopenedPack(purchaseId: string) {
+    setRecentUnopenedPackIds((prev) => {
+      const next = [purchaseId, ...prev.filter((id) => id !== purchaseId)].slice(0, 8);
+      localStorage.setItem(RECENT_UNOPENED_PACK_IDS_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  function markPackOpened(purchaseId: string) {
+    setRecentUnopenedPackIds((prev) => {
+      const next = prev.filter((id) => id !== purchaseId);
+      localStorage.setItem(RECENT_UNOPENED_PACK_IDS_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
 
   useEffect(() => {
     const socket = io(SOCKET_BASE);
@@ -41,6 +85,7 @@ export default function HomePage() {
   }, []);
 
   async function buy(dropId: string) {
+    setBuyingDropId(dropId);
     const token = localStorage.getItem("token") || "";
     const idem = uuid();
     const r = await fetch(`${API_BASE}/packs/buy`, {
@@ -54,11 +99,13 @@ export default function HomePage() {
     });
     const data = await r.json();
     if (r.ok) {
-      setLastPurchaseId(data.purchase.id);
       setMsg(`Bought pack ${data.purchase.id}`);
+      addUnopenedPack(data.purchase.id);
+      setBuyingDropId("");
       return;
     }
     setMsg(data.error);
+    setBuyingDropId("");
   }
 
   function getCountdown(startsAt: string, endsAt: string) {
@@ -88,32 +135,66 @@ export default function HomePage() {
     return new Date(startsAt).getTime() > new Date(serverTime).getTime();
   }
 
+  const orderedDrops = [...drops].sort((a, b) => {
+    const aOrder = TIER_ORDER[a.tier.toUpperCase()] ?? Number.MAX_SAFE_INTEGER;
+    const bOrder = TIER_ORDER[b.tier.toUpperCase()] ?? Number.MAX_SAFE_INTEGER;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    return a.tier.localeCompare(b.tier);
+  });
+
   return (
-    <div className="space-y-4">
-      <h1 className="text-3xl font-bold">Pack Drops</h1>
-      {msg && <p>{msg}</p>}
-      {lastPurchaseId && (
-        <Link className="inline-block rounded bg-emerald-500 px-4 py-2 font-medium text-slate-900" href={`/reveal/${lastPurchaseId}`}>
-          Reveal Last Pack
-        </Link>
+    <div className="page-stack">
+      <h1 className="fluid-title">Pack Drops</h1>
+      {msg && <p className="safe-break text-sm sm:text-base">{msg}</p>}
+      {recentUnopenedPackIds.length > 0 && (
+        <div className="card space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold">Unopened Packs ({recentUnopenedPackIds.length})</h2>
+            <Link
+              className="touch-btn inline-flex bg-emerald-500 text-slate-900"
+              href={`/reveal/${recentUnopenedPackIds[0]}`}
+              onClick={() => markPackOpened(recentUnopenedPackIds[0])}
+            >
+              Reveal Next Pack
+            </Link>
+          </div>
+          {recentUnopenedPackIds.length > 1 && (
+            <details className="rounded border border-slate-700 bg-slate-800/40 p-3">
+              <summary className="cursor-pointer text-sm text-slate-300">Choose a different pack</summary>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {recentUnopenedPackIds.slice(1).map((purchaseId) => (
+                  <Link
+                    key={purchaseId}
+                    href={`/reveal/${purchaseId}`}
+                    onClick={() => markPackOpened(purchaseId)}
+                    className="touch-btn bg-slate-200 text-slate-900"
+                  >
+                    {purchaseId.slice(0, 8)}...
+                  </Link>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
       )}
       <div className="grid gap-4 md:grid-cols-2">
-        {drops.map((d) => {
+        {orderedDrops.map((d) => {
           const closed = isDropClosed(d.ends_at);
           const notStarted = isDropNotStarted(d.starts_at);
           return (
             <div key={d.id} className="card space-y-2">
-              <h2 className="text-xl">{d.tier}</h2>
+              <h2 className="text-lg sm:text-xl">{d.tier}</h2>
               <p>Price: ${d.price}</p>
               <p>Inventory: {d.inventory}</p>
-              <p>Drop: {getCountdown(d.starts_at, d.ends_at)}</p>
+              <p className="safe-break">Drop: {getCountdown(d.starts_at, d.ends_at)}</p>
               <button
-                className="rounded bg-cyan-500 px-3 py-2 text-slate-900 disabled:opacity-50"
+                className="touch-btn w-full bg-cyan-500 text-slate-900 disabled:opacity-50 sm:w-auto"
                 onClick={() => buy(d.id)}
-                disabled={d.inventory <= 0 || closed || notStarted}
+                disabled={!isAuthenticated || d.inventory <= 0 || closed || notStarted || buyingDropId === d.id}
               >
-                {closed ? "Closed" : notStarted ? "Upcoming" : d.inventory <= 0 ? "Sold Out" : "Buy Pack"}
+                {buyingDropId === d.id ? "Buying..." : closed ? "Closed" : notStarted ? "Upcoming" : d.inventory <= 0 ? "Sold Out" : "Buy Pack"}
               </button>
+              {!isAuthenticated && <p className="text-xs text-slate-400">Sign in to buy packs</p>}
             </div>
           );
         })}
