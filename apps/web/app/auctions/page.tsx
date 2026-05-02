@@ -5,6 +5,26 @@ import { API_BASE, SOCKET_BASE, uuid } from "../../lib/config";
 import { SOCKET_EVENTS } from "@pullvault/common";
 import Link from "next/link";
 
+function errorToMessage(error: unknown, fallback = "Something went wrong") {
+  if (typeof error === "string") return error;
+  if (!error || typeof error !== "object") return fallback;
+
+  const maybe = error as { formErrors?: unknown; fieldErrors?: Record<string, unknown> };
+  const form = Array.isArray(maybe.formErrors) ? maybe.formErrors.find((v) => typeof v === "string") : undefined;
+  if (typeof form === "string" && form) return form;
+
+  if (maybe.fieldErrors && typeof maybe.fieldErrors === "object") {
+    for (const value of Object.values(maybe.fieldErrors)) {
+      if (Array.isArray(value)) {
+        const first = value.find((v) => typeof v === "string");
+        if (typeof first === "string" && first) return first;
+      }
+    }
+  }
+
+  return fallback;
+}
+
 export default function AuctionsPage() {
   const [auctions, setAuctions] = useState<any[]>([]);
   const [msg, setMsg] = useState("");
@@ -15,25 +35,45 @@ export default function AuctionsPage() {
   const [syncedAt, setSyncedAt] = useState("");
 
   useEffect(() => {
+    if (!msg) return;
+    const timer = setTimeout(() => setMsg(""), 5000);
+    return () => clearTimeout(timer);
+  }, [msg]);
+
+  useEffect(() => {
     const socket = io(SOCKET_BASE);
-    fetch(`${API_BASE}/auctions/live`)
-      .then((r) => r.json())
-      .then((d) => {
+    async function refreshLiveAuctions(showLoading = false) {
+      if (showLoading) setLoading(true);
+      try {
+        const r = await fetch(`${API_BASE}/auctions/live`);
+        const d = await r.json();
         const rows = d.auctions || [];
         setAuctions(rows);
         const seed: Record<string, string> = {};
         rows.forEach((a: any) => {
           const current = Number(a.current_bid);
           seed[a.id] = (current === 0 ? 1 : Math.max(current + 1, current * 1.05)).toFixed(2);
+          socket.emit(SOCKET_EVENTS.JOIN_AUCTION, a.id);
         });
         setBidInput(seed);
-        rows.forEach((a: any) => socket.emit(SOCKET_EVENTS.JOIN_AUCTION, a.id));
-      })
-      .catch(() => setMsg("Failed to load auctions. Check API server."))
-      .finally(() => setLoading(false));
+      } catch {
+        setMsg("Failed to load auctions. Check API server.");
+      } finally {
+        if (showLoading) setLoading(false);
+      }
+    }
+
+    refreshLiveAuctions(true);
 
     socket.on(SOCKET_EVENTS.AUCTION_UPDATED, (p) => {
-      setAuctions((prev) => prev.map((a) => a.id === p.auctionId ? { ...a, current_bid: p.highestBid, end_time: p.endTime } : a));
+      setAuctions((prev) => {
+        const exists = prev.some((a) => a.id === p.auctionId);
+        if (!exists && p.status === "ACTIVE") {
+          refreshLiveAuctions(false);
+          return prev;
+        }
+        return prev.map((a) => a.id === p.auctionId ? { ...a, current_bid: p.highestBid, end_time: p.endTime } : a);
+      });
       setSelected((prev: any) => prev && prev.auction?.id === p.auctionId ? { ...prev, auction: { ...prev.auction, current_bid: p.highestBid, end_time: p.endTime } } : prev);
       setSyncedAt(new Date().toLocaleTimeString());
     });
@@ -110,7 +150,7 @@ export default function AuctionsPage() {
       body: JSON.stringify({ amount, idempotencyKey: key })
     });
     const data = await r.json();
-    setMsg(r.ok ? `Bid placed at $${amount}` : data.error);
+    setMsg(r.ok ? `Bid placed at $${amount}` : errorToMessage(data?.error, "Failed to place bid"));
     if (r.ok) {
       await openRoom(id);
     }

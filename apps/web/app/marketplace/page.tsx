@@ -5,10 +5,36 @@ import { API_BASE, SOCKET_BASE, uuid } from "../../lib/config";
 import { SOCKET_EVENTS } from "@pullvault/common";
 import Link from "next/link";
 
+function errorToMessage(error: unknown, fallback = "Something went wrong") {
+  if (typeof error === "string") return error;
+  if (!error || typeof error !== "object") return fallback;
+
+  const maybe = error as { formErrors?: unknown; fieldErrors?: Record<string, unknown> };
+  const form = Array.isArray(maybe.formErrors) ? maybe.formErrors.find((v) => typeof v === "string") : undefined;
+  if (typeof form === "string" && form) return form;
+
+  if (maybe.fieldErrors && typeof maybe.fieldErrors === "object") {
+    for (const value of Object.values(maybe.fieldErrors)) {
+      if (Array.isArray(value)) {
+        const first = value.find((v) => typeof v === "string");
+        if (typeof first === "string" && first) return first;
+      }
+    }
+  }
+
+  return fallback;
+}
+
 export default function MarketplacePage() {
   const [listings, setListings] = useState<any[]>([]);
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!msg) return;
+    const timer = setTimeout(() => setMsg(""), 5000);
+    return () => clearTimeout(timer);
+  }, [msg]);
 
   useEffect(() => {
     const socket = io(SOCKET_BASE);
@@ -72,7 +98,7 @@ export default function MarketplacePage() {
       body: JSON.stringify({ idempotencyKey: key })
     });
     const data = await r.json();
-    setMsg(r.ok ? `Bought listing ${id}` : data.error);
+    setMsg(r.ok ? `Bought listing ${id}` : errorToMessage(data?.error, "Failed to buy listing"));
   }
 
   return (

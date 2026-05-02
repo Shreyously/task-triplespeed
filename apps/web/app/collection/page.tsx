@@ -10,6 +10,26 @@ import { useCollectionFilter } from "../../lib/hooks/useCollectionFilter";
 import { useCollectionPersistence } from "../../lib/hooks/useCollectionPersistence";
 import { SortControls } from "../../components/collection/SortControls";
 import { FilterControls } from "../../components/collection/FilterControls";
+
+function errorToMessage(error: unknown, fallback = "Something went wrong") {
+  if (typeof error === "string") return error;
+  if (!error || typeof error !== "object") return fallback;
+
+  const maybe = error as { formErrors?: unknown; fieldErrors?: Record<string, unknown> };
+  const form = Array.isArray(maybe.formErrors) ? maybe.formErrors.find((v) => typeof v === "string") : undefined;
+  if (typeof form === "string" && form) return form;
+
+  if (maybe.fieldErrors && typeof maybe.fieldErrors === "object") {
+    for (const value of Object.values(maybe.fieldErrors)) {
+      if (Array.isArray(value)) {
+        const first = value.find((v) => typeof v === "string");
+        if (typeof first === "string" && first) return first;
+      }
+    }
+  }
+
+  return fallback;
+}
 type Card = {
   id: string;
   name: string;
@@ -38,6 +58,12 @@ export default function CollectionPage() {
 
   // Persistence hook
   useCollectionPersistence(sortConfig, filterConfig, setSortConfig, setFilterConfig);
+
+  useEffect(() => {
+    if (!msg) return;
+    const timer = setTimeout(() => setMsg(""), 5000);
+    return () => clearTimeout(timer);
+  }, [msg]);
 
   useEffect(() => {
     let socket: ReturnType<typeof io> | null = null;
@@ -138,14 +164,13 @@ export default function CollectionPage() {
       socket.on(SOCKET_EVENTS.AUCTION_CLOSED, (payload: any) => {
         if (payload.sellerId === meData?.user?.userId) {
           if (payload.settlement?.winner_id) {
-            // Card was sold in auction, remove it from collection
-            setCards((prevCards) => prevCards.filter((card) => card.id !== payload.cardId));
+            // Remove sold card by auction id because close payload does not include card id.
+            setCards((prevCards) => prevCards.filter((card) => card.auction_id !== payload.auctionId));
             setMsg(`🎵 Your auction sold for $${payload.settlement.gross_amount}! Check your available balance.`);
-            setTimeout(() => setMsg(""), 5000);
           } else {
             // Auction ended without bids, card is available again
             setCards((prevCards) => prevCards.map((card) => {
-              if (card.id === payload.cardId) {
+              if (card.auction_id === payload.auctionId) {
                 return {
                   ...card,
                   market_state: "NONE",
@@ -161,7 +186,6 @@ export default function CollectionPage() {
       socket.on(SOCKET_EVENTS.LISTING_SOLD, (payload) => {
         if (payload.sellerId === meData?.user?.userId) {
           setMsg(`💰 Your ${payload.cardName} sold for $${payload.price}! Check your available balance.`);
-          setTimeout(() => setMsg(""), 5000);
           // Remove the sold card from the collection
           setCards((prevCards) => prevCards.filter((card) => card.id !== payload.cardId));
         }
@@ -186,7 +210,7 @@ export default function CollectionPage() {
       body: JSON.stringify({ cardId, price })
     });
     const data = await res.json();
-    setMsg(res.ok ? `Listed card ${data.listing.id}` : data.error);
+    setMsg(res.ok ? `Listed card ${data.listing.id}` : errorToMessage(data?.error, "Failed to list card"));
   }
 
   async function startAuction(cardId: string) {
@@ -197,7 +221,7 @@ export default function CollectionPage() {
       body: JSON.stringify({ cardId, durationSeconds: 300, idempotencyKey: uuid() })
     });
     const data = await res.json();
-    setMsg(res.ok ? `Auction started ${data.auction.id}` : data.error);
+    setMsg(res.ok ? `Auction started ${data.auction.id}` : errorToMessage(data?.error, "Failed to start auction"));
   }
 
   // Apply filtering and sorting
