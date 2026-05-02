@@ -9,9 +9,9 @@ const auctionWatchers = new Map<string, Set<string>>();
 export function setupSocket(server: HttpServer) {
   io = new Server(server, { cors: { origin: config.corsOrigin } });
   io.on("connection", (socket) => {
-    socket.on("join:drop", (dropId: string) => socket.join(`drop:${dropId}`));
-    socket.on("join:user", (userId: string) => socket.join(`user:${userId}`));
-    socket.on("join:auction", (auctionId: string) => {
+    socket.on(SOCKET_EVENTS.JOIN_DROP, (dropId: string) => socket.join(`drop:${dropId}`));
+    socket.on(SOCKET_EVENTS.JOIN_USER, (userId: string) => socket.join(`user:${userId}`));
+    socket.on(SOCKET_EVENTS.JOIN_AUCTION, (auctionId: string) => {
       socket.join(`auction:${auctionId}`);
       const current = auctionWatchers.get(auctionId) ?? new Set<string>();
       current.add(socket.id);
@@ -46,8 +46,23 @@ export function emitAuctionWatchers(auctionId: string, count: number) {
   io?.to(`auction:${auctionId}`).emit(SOCKET_EVENTS.AUCTION_WATCHERS_UPDATED, { auctionId, watchers: count });
 }
 
-export function emitAuctionClosed(auctionId: string, payload: { auctionId: string; status: string; settlement: any }) {
+export function emitAuctionClosed(auctionId: string, payload: { auctionId: string; status: string; settlement: any; sellerId?: string }) {
   io?.to(`auction:${auctionId}`).emit(SOCKET_EVENTS.AUCTION_CLOSED, payload);
+  // Also notify the seller directly so their collection updates
+  if (payload.sellerId) {
+    io?.to(`user:${payload.sellerId}`).emit(SOCKET_EVENTS.AUCTION_CLOSED, payload);
+  }
+}
+
+export function emitAuctionCreated(payload: {
+  auctionId: string;
+  cardId: string;
+  cardName: string;
+  sellerId: string;
+  startingBid: string;
+  endsAt: string;
+}) {
+  io?.emit(SOCKET_EVENTS.AUCTION_UPDATED, { ...payload, status: "ACTIVE" });
 }
 
 export function emitListingSold(listingId: string, payload: {
@@ -61,6 +76,10 @@ export function emitListingSold(listingId: string, payload: {
   io?.emit(SOCKET_EVENTS.LISTING_SOLD, payload);
 }
 
+export function emitListingCreated(payload: any) {
+  io?.emit(SOCKET_EVENTS.LISTING_CREATED, payload);
+}
+
 export function getAuctionWatcherCount(auctionId: string): number {
   return auctionWatchers.get(auctionId)?.size ?? 0;
 }
@@ -71,4 +90,12 @@ export function emitPriceUpdate(payload: unknown) {
 
 export function emitPortfolioUpdate(userId: string, payload: unknown) {
   io?.to(`user:${userId}`).emit(SOCKET_EVENTS.PORTFOLIO_UPDATED, payload);
+}
+
+export function emitDropPrice(dropId: string, price: string) {
+  io?.to(`drop:${dropId}`).emit(SOCKET_EVENTS.DROP_PRICE_UPDATED, { dropId, price });
+}
+
+export function emitDropStatus(dropId: string, startsAt: string, endsAt: string) {
+  io?.to(`drop:${dropId}`).emit(SOCKET_EVENTS.DROP_STATUS_UPDATED, { dropId, startsAt, endsAt });
 }

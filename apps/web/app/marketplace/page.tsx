@@ -18,6 +18,10 @@ export default function MarketplacePage() {
       .catch(() => setMsg("Failed to load marketplace. Check API server."))
       .finally(() => setLoading(false));
 
+    socket.on(SOCKET_EVENTS.LISTING_CREATED, (payload) => {
+      setListings((prev) => [payload, ...prev]);
+    });
+
     socket.on(SOCKET_EVENTS.LISTING_SOLD, (payload) => {
       setListings((prev) => prev.filter((l) => l.id !== payload.listingId));
 
@@ -36,6 +40,18 @@ export default function MarketplacePage() {
             setMsg(`💰 Your ${payload.cardName} sold for $${payload.price}!`);
           }
         });
+    });
+
+    socket.on(SOCKET_EVENTS.PRICE_CARD_UPDATED, (payload: any) => {
+      if (payload.cards && Array.isArray(payload.cards)) {
+        setListings((prev) => prev.map((listing) => {
+          const update = payload.cards.find((u: any) => u.id === listing.card_id);
+          if (update) {
+            return { ...listing, market_value: update.value };
+          }
+          return listing;
+        }));
+      }
     });
 
     return () => {

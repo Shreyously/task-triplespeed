@@ -14,7 +14,10 @@ export const buyPackSchema = z.object({
 
 export const createListingSchema = z.object({
   cardId: z.string().uuid(),
-  price: z.string()
+  price: z.string().refine(
+    (val) => !isNaN(Number(val)) && Number(val) >= 0.01 && Number(val) <= 1000000,
+    "Price must be between $0.01 and $1,000,000"
+  )
 });
 
 export const buyListingSchema = z.object({
@@ -27,6 +30,9 @@ export const createAuctionSchema = z.object({
 });
 
 export const placeBidSchema = z.object({
-  amount: z.string(),
+  amount: z.string().refine(
+    (val) => !isNaN(Number(val)) && Number(val) > 0,
+    "Bid amount must be a positive number"
+  ),
   idempotencyKey: z.string().min(8).optional()
 });

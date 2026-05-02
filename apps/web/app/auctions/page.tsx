@@ -27,7 +27,7 @@ export default function AuctionsPage() {
           seed[a.id] = (current === 0 ? 1 : Math.max(current + 1, current * 1.05)).toFixed(2);
         });
         setBidInput(seed);
-        rows.forEach((a: any) => socket.emit("join:auction", a.id));
+        rows.forEach((a: any) => socket.emit(SOCKET_EVENTS.JOIN_AUCTION, a.id));
       })
       .catch(() => setMsg("Failed to load auctions. Check API server."))
       .finally(() => setLoading(false));
@@ -62,6 +62,27 @@ export default function AuctionsPage() {
         setSelected((prev: any) => prev?.auction?.id === payload.auctionId ? null : prev);
       }, 5000);
     });
+    socket.on(SOCKET_EVENTS.PRICE_CARD_UPDATED, (payload: any) => {
+      if (payload.cards && Array.isArray(payload.cards)) {
+        setAuctions((prev) => prev.map((a) => {
+          const update = payload.cards.find((u: any) => u.id === a.card_id);
+          if (update) {
+            return { ...a, market_value: update.value };
+          }
+          return a;
+        }));
+        setSelected((prev: any) => {
+          if (prev?.auction) {
+            const update = payload.cards.find((u: any) => u.id === prev.auction.card_id);
+            if (update) {
+              return { ...prev, auction: { ...prev.auction, market_value: update.value } };
+            }
+          }
+          return prev;
+        });
+      }
+    });
+
     return () => {
       socket.disconnect();
     };

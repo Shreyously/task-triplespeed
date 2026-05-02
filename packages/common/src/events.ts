@@ -6,5 +6,11 @@ export const SOCKET_EVENTS = {
   AUCTION_WATCHERS_UPDATED: "auction:watchers:updated",
   PRICE_CARD_UPDATED: "price:card:updated",
   PORTFOLIO_UPDATED: "portfolio:updated",
-  LISTING_SOLD: "listing:sold"
+  LISTING_SOLD: "listing:sold",
+  DROP_PRICE_UPDATED: "drop:price:updated",
+  DROP_STATUS_UPDATED: "drop:status:updated",
+  LISTING_CREATED: "listing:created",
+  JOIN_DROP: "join:drop",
+  JOIN_USER: "join:user",
+  JOIN_AUCTION: "join:auction"
 } as const;

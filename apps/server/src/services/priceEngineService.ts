@@ -24,8 +24,10 @@ export function priceForRarity(rarity: string): Decimal {
 }
 
 export async function runPriceTick() {
+  console.log("Price tick starting...");
   return withTx(async (client) => {
     const cards = await getAllCards(client);
+    console.log(`Found ${cards.length} cards to update`);
     const updates: Array<{ id: string; value: string }> = [];
     const ownerCards = new Map<string, Array<{ id: string; marketValue: string; acquisitionValue: string }>>();
     const ownerTotals = new Map<string, Decimal>();
@@ -34,6 +36,11 @@ export async function runPriceTick() {
       const current = new Decimal(card.market_value);
       const drift = new Decimal(randomBetween(-0.012, 0.012));
       const next = Decimal.max(0.01, current.mul(new Decimal(1).plus(drift))).toDecimalPlaces(2);
+
+      const diff = next.minus(current);
+      const diffStr = diff.gte(0) ? `+${diff.toFixed(2)}` : diff.toFixed(2);
+      console.log(`[Price Change] ${card.name}: ${current.toFixed(2)} -> ${next.toFixed(2)} (${next.toFixed(2)} - ${current.toFixed(2)} = ${diffStr})`);
+
       updates.push({ id: card.id, value: next.toFixed(2) });
 
       if (!ownerCards.has(card.owner_id)) {
@@ -50,7 +57,11 @@ export async function runPriceTick() {
 
     if (!updates.length) return;
     await updateCardMarketValues(client, updates);
-    emitPriceUpdate({ updated: updates.length, at: new Date().toISOString() });
+    emitPriceUpdate({ 
+      updated: updates.length, 
+      cards: updates,
+      at: new Date().toISOString() 
+    });
 
     for (const [userId, cardUpdates] of ownerCards) {
       emitPortfolioUpdate(userId, {

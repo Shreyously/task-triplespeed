@@ -16,7 +16,11 @@ export async function getCardsByPurchase(client: PoolClient, purchaseId: string)
 
 export async function getCardsByOwner(client: PoolClient, ownerId: string) {
   const { rows } = await client.query(
-    "select * from cards where owner_id=$1 order by created_at desc",
+    `select c.*, cms.state as market_state, cms.listing_id, cms.auction_id
+     from cards c
+     left join card_market_state cms on c.id = cms.card_id
+     where c.owner_id=$1
+     order by c.created_at desc`,
     [ownerId]
   );
   return rows;
@@ -29,7 +33,7 @@ export async function updateCardMarketValues(client: PoolClient, rowsToUpdate: A
 }
 
 export async function getAllCards(client: PoolClient) {
-  const { rows } = await client.query("select id, owner_id, rarity, market_value, acquisition_value from cards");
+  const { rows } = await client.query("select id, name, owner_id, rarity, market_value, acquisition_value from cards");
   return rows;
 }
 

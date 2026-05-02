@@ -11,4 +11,5 @@ startWorkers();
 
 server.listen(config.port, () => {
   console.log(`PullVault server listening on :${config.port}`);
+  console.log(`Price tick interval: ${config.priceTickSeconds}s`);
 });

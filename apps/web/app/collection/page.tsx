@@ -10,8 +10,6 @@ import { useCollectionFilter } from "../../lib/hooks/useCollectionFilter";
 import { useCollectionPersistence } from "../../lib/hooks/useCollectionPersistence";
 import { SortControls } from "../../components/collection/SortControls";
 import { FilterControls } from "../../components/collection/FilterControls";
-import { CollectionStats } from "../../components/collection/CollectionStats";
-
 type Card = {
   id: string;
   name: string;
@@ -19,8 +17,12 @@ type Card = {
   rarity: string;
   image_url: string;
   market_value: string;
+  acquisition_value: string;
   pnl: string;
   created_at: string;
+  market_state?: string;
+  listing_id?: string;
+  auction_id?: string;
 };
 
 export default function CollectionPage() {
@@ -66,7 +68,7 @@ export default function CollectionPage() {
       setCards(cardsData.cards ?? []);
       setSummary(summaryData);
       socket = io(SOCKET_BASE);
-      socket.emit("join:user", meData?.user?.userId);
+      socket.emit(SOCKET_EVENTS.JOIN_USER, meData?.user?.userId);
       socket.on(SOCKET_EVENTS.PORTFOLIO_UPDATED, (event) => {
         setSummary((prev) => ({ ...prev, cardsValue: event.portfolioValue, netWorth: (Number(event.portfolioValue) + Number(prev.availableBalance) + Number(prev.heldBalance)).toFixed(2) }));
 
@@ -86,10 +88,82 @@ export default function CollectionPage() {
         }
       });
 
+      socket.on(SOCKET_EVENTS.PRICE_CARD_UPDATED, (payload: any) => {
+        if (payload.cards && Array.isArray(payload.cards)) {
+          setCards((prevCards) => prevCards.map((card) => {
+            const updated = payload.cards.find((u: any) => u.id === card.id);
+            if (updated) {
+              const pnl = Number(updated.value) - Number(card.acquisition_value);
+              return {
+                ...card,
+                market_value: updated.value,
+                pnl: pnl.toFixed(2)
+              };
+            }
+            return card;
+          }));
+        }
+      });
+
+      socket.on(SOCKET_EVENTS.LISTING_CREATED, (payload: any) => {
+        if (payload.seller_id === meData?.user?.userId) {
+          setCards((prevCards) => prevCards.map((card) => {
+            if (card.id === payload.cardId) {
+              return {
+                ...card,
+                market_state: "LISTED",
+                listing_id: payload.id
+              };
+            }
+            return card;
+          }));
+        }
+      });
+
+      socket.on(SOCKET_EVENTS.AUCTION_UPDATED, (payload: any) => {
+        if (payload.sellerId === meData?.user?.userId && payload.status === "ACTIVE") {
+          setCards((prevCards) => prevCards.map((card) => {
+            if (card.id === payload.cardId) {
+              return {
+                ...card,
+                market_state: "IN_AUCTION",
+                auction_id: payload.auctionId
+              };
+            }
+            return card;
+          }));
+        }
+      });
+
+      socket.on(SOCKET_EVENTS.AUCTION_CLOSED, (payload: any) => {
+        if (payload.sellerId === meData?.user?.userId) {
+          if (payload.settlement?.winner_id) {
+            // Card was sold in auction, remove it from collection
+            setCards((prevCards) => prevCards.filter((card) => card.id !== payload.cardId));
+            setMsg(`🎵 Your auction sold for $${payload.settlement.gross_amount}! Check your available balance.`);
+            setTimeout(() => setMsg(""), 5000);
+          } else {
+            // Auction ended without bids, card is available again
+            setCards((prevCards) => prevCards.map((card) => {
+              if (card.id === payload.cardId) {
+                return {
+                  ...card,
+                  market_state: "NONE",
+                  auction_id: undefined
+                };
+              }
+              return card;
+            }));
+          }
+        }
+      });
+
       socket.on(SOCKET_EVENTS.LISTING_SOLD, (payload) => {
         if (payload.sellerId === meData?.user?.userId) {
           setMsg(`💰 Your ${payload.cardName} sold for $${payload.price}! Check your available balance.`);
           setTimeout(() => setMsg(""), 5000);
+          // Remove the sold card from the collection
+          setCards((prevCards) => prevCards.filter((card) => card.id !== payload.cardId));
         }
       });
     })().catch(() => setMsg("Failed to load collection"));
@@ -100,7 +174,12 @@ export default function CollectionPage() {
 
   async function listCard(cardId: string) {
     const token = localStorage.getItem("token") || "";
-    const price = listingPrice[cardId] ?? "1.00";
+    const price = listingPrice[cardId];
+    if (!price || Number(price) <= 0) {
+      setMsg("Please enter a valid price greater than $0.00");
+      setTimeout(() => setMsg(""), 3000);
+      return;
+    }
     const res = await fetch(`${API_BASE}/listings`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
@@ -132,6 +211,25 @@ export default function CollectionPage() {
     sortedCards.reduce((sum, card) => sum + Number(card.market_value), 0).toFixed(2),
     [sortedCards]
   );
+
+  // Helper function to render market status badge
+  const renderMarketBadge = (card: Card) => {
+    if (card.market_state === "LISTED") {
+      return (
+        <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-400 ring-1 ring-inset ring-emerald-500/20">
+          Listed
+        </span>
+      );
+    }
+    if (card.market_state === "IN_AUCTION") {
+      return (
+        <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-400 ring-1 ring-inset ring-amber-500/20">
+          In Auction
+        </span>
+      );
+    }
+    return null;
+  };
 
   // Event handlers for sort/filter
   const handleSortFieldChange = (field: SortField) => {
@@ -188,7 +286,7 @@ export default function CollectionPage() {
       </div>
 
       {/* Controls Section */}
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2">
         <SortControls
           currentSort={sortConfig}
           onSortChange={handleSortFieldChange}
@@ -203,14 +301,14 @@ export default function CollectionPage() {
           onValueRangeChange={handleValueRangeChange}
           onClearFilters={handleClearFilters}
         />
-        <CollectionStats
-          totalCards={cards.length}
-          filteredCards={sortedCards.length}
-          totalValue={totalFilteredValue}
-        />
       </div>
 
       {/* Cards Grid */}
+      <div className="flex items-center justify-between mt-4">
+        <h2 className="text-xl font-semibold">Your Cards</h2>
+        <p className="text-sm text-slate-400">Showing {sortedCards.length} of {cards.length} cards</p>
+      </div>
+
       {sortedCards.length === 0 ? (
         <div className="card">
           <p>No cards match your current filters.</p>
@@ -225,21 +323,38 @@ export default function CollectionPage() {
         <div className="grid gap-4 md:grid-cols-2">
           {sortedCards.map((card) => (
             <div className="card space-y-2" key={card.id}>
-              <img src={card.image_url} alt={card.name} className="h-40 rounded object-contain" />
+              <div className="flex items-start justify-between">
+                <img src={card.image_url} alt={card.name} className="h-40 rounded object-contain" />
+                <div className="flex flex-col gap-1">
+                  {renderMarketBadge(card)}
+                </div>
+              </div>
               <h2 className="text-lg font-semibold">{card.name}</h2>
               <p>{card.set_name} - {card.rarity}</p>
               <p>Market: ${card.market_value}</p>
               <p className={Number(card.pnl) >= 0 ? "text-emerald-400" : "text-rose-400"}>P/L: ${card.pnl}</p>
-              <div className="flex gap-2">
-                <input
-                  className="w-28 rounded bg-slate-800 px-2 py-1"
-                  value={listingPrice[card.id] ?? ""}
-                  onChange={(e) => setListingPrice((prev) => ({ ...prev, [card.id]: e.target.value }))}
-                  placeholder="List price"
-                />
-                <button className="rounded bg-cyan-500 px-3 py-2 text-slate-900" onClick={() => listCard(card.id)}>List</button>
-                <button className="rounded bg-amber-400 px-3 py-2 text-slate-900" onClick={() => startAuction(card.id)}>Auction</button>
-              </div>
+              {card.market_state === "NONE" || !card.market_state ? (
+                <div className="flex gap-2">
+                  <input
+                    className="w-28 rounded bg-slate-800 px-2 py-1"
+                    value={listingPrice[card.id] ?? ""}
+                    onChange={(e) => setListingPrice((prev) => ({ ...prev, [card.id]: e.target.value }))}
+                    placeholder="List price"
+                  />
+                  <button
+                    className="rounded bg-cyan-500 px-3 py-2 text-slate-900 disabled:opacity-50 disabled:cursor-not-allowed"
+                    onClick={() => listCard(card.id)}
+                    disabled={!listingPrice[card.id] || Number(listingPrice[card.id]) <= 0}
+                  >
+                    List
+                  </button>
+                  <button className="rounded bg-amber-400 px-3 py-2 text-slate-900" onClick={() => startAuction(card.id)}>Auction</button>
+                </div>
+              ) : (
+                <p className="text-sm text-slate-400">
+                  {card.market_state === "LISTED" ? "Card is listed in marketplace" : "Card is in auction"}
+                </p>
+              )}
             </div>
           ))}
         </div>

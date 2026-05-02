@@ -1,12 +1,13 @@
 import Decimal from "decimal.js";
 import { pool, withTx } from "../db/pool";
-import { getDropForUpdate, listDrops } from "../repositories/dropRepository";
+import { getDropForUpdate, listDrops, updateDrop } from "../repositories/dropRepository";
 import { createPackPurchase, getPurchaseById } from "../repositories/packRepository";
 import { createCard, getCardsByPurchase } from "../repositories/cardRepository";
 import { createLedger } from "../repositories/ledgerRepository";
 import { debitAvailable } from "./balanceService";
 import { getCardPool } from "./pokemonCardService";
 import { priceForRarity } from "./priceEngineService";
+import { emitDropInventory, emitDropPrice, emitDropStatus } from "../realtime/socket";
 
 function weightedPick(weights: Record<string, number>): string {
   const entries = Object.entries(weights);
@@ -105,5 +106,46 @@ export async function revealPack(userId: string, purchaseId: string) {
     };
   } finally {
     client.release();
+  }
+}
+
+export async function adminUpdateDrop(dropId: string, updates: { price?: string; starts_at?: string; ends_at?: string }) {
+  const client = await pool.connect();
+  try {
+    return await updateDrop(client, dropId, updates);
+  } finally {
+    client.release();
+  }
+}
+
+const dropCache = new Map<string, { price: string; inventory: number; starts_at: Date; ends_at: Date }>();
+
+export async function syncDrops() {
+  const drops = await getDrops();
+  for (const drop of drops) {
+    const cached = dropCache.get(drop.id);
+    const currentPrice = String(drop.price);
+    const currentInventory = Number(drop.inventory);
+    const currentStarts = new Date(drop.starts_at);
+    const currentEnds = new Date(drop.ends_at);
+
+    if (cached) {
+      if (cached.price !== currentPrice) {
+        emitDropPrice(drop.id, currentPrice);
+      }
+      if (cached.inventory !== currentInventory) {
+        emitDropInventory(drop.id, currentInventory);
+      }
+      if (cached.starts_at.getTime() !== currentStarts.getTime() || cached.ends_at.getTime() !== currentEnds.getTime()) {
+        emitDropStatus(drop.id, currentStarts.toISOString(), currentEnds.toISOString());
+      }
+    }
+    
+    dropCache.set(drop.id, { 
+      price: currentPrice, 
+      inventory: currentInventory,
+      starts_at: currentStarts, 
+      ends_at: currentEnds 
+    });
   }
 }

@@ -17,7 +17,7 @@ import { updateCardAcquisitionValue } from "../repositories/cardRepository";
 import { auctionFee } from "./feeService";
 import { creditAvailable, holdFunds, releaseFunds, spendHeld } from "./balanceService";
 import { getBalanceForUpdate } from "../repositories/balanceRepository";
-import { emitAuctionClosed, getAuctionWatcherCount } from "../realtime/socket";
+import { emitAuctionClosed, emitAuctionCreated, getAuctionWatcherCount } from "../realtime/socket";
 
 function minIncrement(current: Decimal): Decimal {
   const pct = current.times(0.05).toDecimalPlaces(2);
@@ -36,6 +36,16 @@ export async function createAuctionForCard(userId: string, cardId: string, durat
     const end = new Date(start.getTime() + durationSeconds * 1000);
     const auction = await createAuction(client, cardId, userId, start, end);
     await client.query("update card_market_state set state='IN_AUCTION', auction_id=$2, updated_at=now() where card_id=$1", [cardId, auction.id]);
+
+    emitAuctionCreated({
+      auctionId: auction.id,
+      cardId: card.id,
+      cardName: card.name,
+      sellerId: userId,
+      startingBid: auction.starting_bid,
+      endsAt: auction.ends_at
+    });
+
     return auction;
   });
 }
@@ -173,7 +183,7 @@ export async function settlementTick(platformUserId: string) {
         settledIds.push(auction.id);
       }
 
-      emitAuctionClosed(auction.id, { auctionId: auction.id, status: "SETTLED", settlement: settlementData });
+      emitAuctionClosed(auction.id, { auctionId: auction.id, status: "SETTLED", settlement: settlementData, sellerId: auction.seller_id });
     }
 
     return settledIds;

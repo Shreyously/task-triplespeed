@@ -4,7 +4,7 @@ import { ensureCardMarketState, getCardForUpdate, getCardMarketStateForUpdate, u
 import { createListing, getListingForUpdate, listActiveListings, markListingSold } from "../repositories/listingRepository";
 import { createLedger } from "../repositories/ledgerRepository";
 import { updateCardAcquisitionValue } from "../repositories/cardRepository";
-import { emitListingSold } from "../realtime/socket";
+import { emitListingSold, emitListingCreated } from "../realtime/socket";
 import { debitAvailable, creditAvailable } from "./balanceService";
 import { tradeFee } from "./feeService";
 
@@ -17,6 +17,17 @@ export async function listCard(userId: string, cardId: string, priceStr: string)
     if (!state || state.state !== "NONE") throw new Error("Card already locked in market");
     const listing = await createListing(client, cardId, userId, priceStr);
     await client.query("update card_market_state set state='LISTED', listing_id=$2, updated_at=now() where card_id=$1", [cardId, listing.id]);
+    
+    emitListingCreated({
+      ...listing,
+      cardId: card.id,
+      card_name: card.name,
+      set_name: card.set_name,
+      rarity: card.rarity,
+      image_url: card.image_url,
+      market_value: card.market_value
+    });
+
     return listing;
   });
 }
