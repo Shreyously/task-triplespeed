@@ -72,8 +72,11 @@ export default function AnalyticsDashboard() {
           <MetricCard label="Pack Revenue" value={`$${data.revenue.packRevenue}`} />
           <MetricCard label="Trading Fees" value={`$${data.revenue.tradeFees}`} />
           <MetricCard label="Auction Fees" value={`$${data.revenue.auctionFees}`} />
-          <MetricCard label="Total Revenue" value={`$${data.revenue.totalRevenue}`} highlight />
+          <MetricCard label="Gross Revenue" value={`$${data.revenue.totalRevenue}`} highlight />
         </div>
+        <p className="text-xs text-slate-400">
+          Gross Revenue = Pack Revenue + Trading Fees + Auction Fees
+        </p>
       </section>
 
       {/* Transaction Volumes */}
@@ -138,14 +141,18 @@ export default function AnalyticsDashboard() {
       <section className="card space-y-4">
         <h2 className="text-xl font-semibold">Platform Profitability</h2>
         <div className="grid gap-4 md:grid-cols-3">
-          <MetricCard label="Total Revenue" value={`$${data.profitability.totalRevenue}`} />
-          <MetricCard label="Total Costs" value={`$${data.profitability.totalCosts}`} />
+          <MetricCard label="Gross Revenue" value={`$${data.profitability.totalRevenue}`} />
+          <MetricCard label="COGS (Realized)" value={`$${data.profitability.totalCosts}`} />
+          <MetricCard label="Gross Profit" value={`$${data.profitability.grossProfit}`} highlight={Number(data.profitability.grossProfit) > 0} />
           <MetricCard
-            label="Profit Margin"
+            label="Gross Profit Margin"
             value={`${data.profitability.profitMargin.toFixed(1)}%`}
             highlight={data.profitability.profitMargin > 0}
           />
         </div>
+        <p className="text-xs text-slate-400">
+          COGS (Realized) = Sum of assigned card acquisition values for sold packs.
+        </p>
       </section>
 
       {/* Market Statistics */}

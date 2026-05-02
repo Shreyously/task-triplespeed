@@ -1,4 +1,5 @@
 import { PoolClient } from "pg";
+import Decimal from "decimal.js";
 
 export async function getRevenueBreakdown(client: PoolClient, platformUserId: string) {
   // Pack revenue (sum of all pack purchases)
@@ -19,18 +20,16 @@ export async function getRevenueBreakdown(client: PoolClient, platformUserId: st
     FROM auction_settlements
   `);
 
-  // Platform revenue (fees credited to platform user)
-  const platformRevenueResult = await client.query(`
-    SELECT COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) as total
-    FROM ledger
-    WHERE user_id = $1 AND type = 'FEE_CREDIT'
-  `, [platformUserId]);
+  const packRevenue = new Decimal(packResult.rows[0].total || 0);
+  const tradeFees = new Decimal(tradeFeeResult.rows[0].total || 0);
+  const auctionFees = new Decimal(auctionFeeResult.rows[0].total || 0);
+  const totalRevenue = packRevenue.plus(tradeFees).plus(auctionFees);
 
   return {
-    packRevenue: packResult.rows[0].total || "0.00",
-    tradeFees: tradeFeeResult.rows[0].total || "0.00",
-    auctionFees: auctionFeeResult.rows[0].total || "0.00",
-    totalRevenue: platformRevenueResult.rows[0].total || "0.00"
+    packRevenue: packRevenue.toFixed(2),
+    tradeFees: tradeFees.toFixed(2),
+    auctionFees: auctionFees.toFixed(2),
+    totalRevenue: totalRevenue.toFixed(2)
   };
 }
 
@@ -141,30 +140,39 @@ export async function getTransactionVolumes(client: PoolClient, timeframe: strin
 }
 
 export async function getPlatformProfitability(client: PoolClient, platformUserId: string) {
-  // Total revenue (fees collected)
-  const revenueResult = await client.query(`
-    SELECT COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) as total
-    FROM ledger
-    WHERE user_id = $1 AND type = 'FEE_CREDIT'
-  `, [platformUserId]);
+  const [packResult, tradeFeeResult, auctionFeeResult, realizedCogsResult] = await Promise.all([
+    client.query(`
+      SELECT COALESCE(SUM(price_paid), 0) as total
+      FROM pack_purchases
+    `),
+    client.query(`
+      SELECT COALESCE(SUM(fee_amount), 0) as total
+      FROM trade_transactions
+    `),
+    client.query(`
+      SELECT COALESCE(SUM(fee_amount), 0) as total
+      FROM auction_settlements
+    `),
+    client.query(`
+      SELECT COALESCE(SUM(c.acquisition_value), 0) as total
+      FROM cards c
+      INNER JOIN pack_purchases p ON p.id = c.purchase_id
+    `)
+  ]);
 
-  // Total costs (pack purchases - what users paid vs card values)
-  // For simplicity, we use pack revenue as proxy for costs
-  const costResult = await client.query(`
-    SELECT COALESCE(SUM(price_paid), 0) as total
-    FROM pack_purchases
-  `);
-
-  const totalRevenue = Number(revenueResult.rows[0].total) || 0;
-  const totalCosts = Number(costResult.rows[0].total) || 0;
-  const grossProfit = totalRevenue; // Platform only earns fees, no costs
-  const profitMargin = totalCosts > 0 ? (grossProfit / totalCosts) * 100 : 0;
+  const packRevenue = new Decimal(packResult.rows[0].total || 0);
+  const tradeFees = new Decimal(tradeFeeResult.rows[0].total || 0);
+  const auctionFees = new Decimal(auctionFeeResult.rows[0].total || 0);
+  const totalRevenue = packRevenue.plus(tradeFees).plus(auctionFees);
+  const totalCosts = new Decimal(realizedCogsResult.rows[0].total || 0);
+  const grossProfit = totalRevenue.minus(totalCosts);
+  const profitMargin = totalRevenue.gt(0) ? grossProfit.div(totalRevenue).times(100) : new Decimal(0);
 
   return {
     totalRevenue: totalRevenue.toFixed(2),
     totalCosts: totalCosts.toFixed(2),
     grossProfit: grossProfit.toFixed(2),
-    profitMargin: Math.round(profitMargin * 100) / 100
+    profitMargin: Number(profitMargin.toDecimalPlaces(2).toString())
   };
 }
 

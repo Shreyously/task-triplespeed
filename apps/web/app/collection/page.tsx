@@ -40,6 +40,8 @@ export default function CollectionPage() {
   const [filterConfig, setFilterConfig] = useState<FilterConfig>({ rarities: [], sets: [], valueRange: null });
   const [listingCardId, setListingCardId] = useState("");
   const [auctioningCardId, setAuctioningCardId] = useState("");
+  const [auctionDurationByCard, setAuctionDurationByCard] = useState<Record<string, string>>({});
+  const [selectedCard, setSelectedCard] = useState<Card | null>(null);
 
   useCollectionPersistence(sortConfig, filterConfig, setSortConfig, setFilterConfig);
 
@@ -143,7 +145,8 @@ export default function CollectionPage() {
   async function startAuction(cardId: string) {
     setAuctioningCardId(cardId);
     const token = localStorage.getItem("token") || "";
-    const res = await fetch(`${API_BASE}/auctions`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ cardId, durationSeconds: 300, idempotencyKey: uuid() }) });
+    const durationSeconds = Number(auctionDurationByCard[cardId] ?? "300");
+    const res = await fetch(`${API_BASE}/auctions`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ cardId, durationSeconds, idempotencyKey: uuid() }) });
     const data = await res.json();
     setMsg(res.ok ? `Auction started ${data.auction.id}` : errorToMessage(data?.error, "Failed to start auction"));
     setAuctioningCardId("");
@@ -209,6 +212,12 @@ export default function CollectionPage() {
                   <p className="safe-break">{card.set_name} - {card.rarity}</p>
                   <p>Market: ${card.market_value}</p>
                   <p className={Number(card.pnl) >= 0 ? "text-emerald-400" : "text-rose-400"}>P/L: ${card.pnl}</p>
+                  <button
+                    className="touch-btn w-full bg-slate-200 text-slate-900 sm:w-auto"
+                    onClick={() => setSelectedCard(card)}
+                  >
+                    View details
+                  </button>
                   {card.market_state === "NONE" || !card.market_state ? (
                     <div className="space-y-2">
                       <div className="flex flex-wrap gap-2">
@@ -219,6 +228,15 @@ export default function CollectionPage() {
                         <button className="touch-btn w-full bg-amber-400 text-slate-900 disabled:opacity-60 sm:w-auto" onClick={() => startAuction(card.id)} disabled={auctioningCardId === card.id}>
                           {auctioningCardId === card.id ? "Starting..." : "Auction"}
                         </button>
+                        <select
+                          className="touch-input w-full sm:w-36"
+                          value={auctionDurationByCard[card.id] ?? "300"}
+                          onChange={(e) => setAuctionDurationByCard((prev) => ({ ...prev, [card.id]: e.target.value }))}
+                        >
+                          <option value="60">1m (60s)</option>
+                          <option value="300">5m (300s)</option>
+                          <option value="900">15m (900s)</option>
+                        </select>
                       </div>
                       <p className="text-xs text-slate-400">
                         Sale fees: Marketplace {(FEES.TRADE_FEE_RATE * 100).toFixed(0)}%, Auction {(FEES.AUCTION_FEE_RATE * 100).toFixed(0)}% (charged only if sold).
@@ -232,6 +250,34 @@ export default function CollectionPage() {
             </div>
           )}
         </>
+      )}
+      {selectedCard && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/60">
+          <div className="h-full w-full max-w-md overflow-y-auto border-l border-slate-700 bg-slate-900 p-4">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Card Details</h2>
+              <button className="touch-btn bg-slate-200 text-slate-900" onClick={() => setSelectedCard(null)}>Close</button>
+            </div>
+            <div className="space-y-3">
+              <img src={selectedCard.image_url} alt={selectedCard.name} className="safe-media h-48 w-48 rounded" />
+              <p className="safe-break text-lg font-semibold">{selectedCard.name}</p>
+              <p className="safe-break text-sm text-slate-300">{selectedCard.set_name} - {selectedCard.rarity}</p>
+              <p className="safe-break text-xs text-slate-400">Card ID: {selectedCard.id}</p>
+              <div className="rounded bg-slate-800/60 p-3 text-sm">
+                <p>Market Value: ${selectedCard.market_value}</p>
+                <p>Acquisition Value: ${selectedCard.acquisition_value}</p>
+                <p>P/L: ${selectedCard.pnl}</p>
+                <p>P/L %: {Number(selectedCard.acquisition_value) > 0 ? ((Number(selectedCard.market_value) - Number(selectedCard.acquisition_value)) / Number(selectedCard.acquisition_value) * 100).toFixed(2) : "0.00"}%</p>
+              </div>
+              <div className="rounded bg-slate-800/60 p-3 text-sm">
+                <p>Market State: {selectedCard.market_state ?? "NONE"}</p>
+                <p className="safe-break">Listing ID: {selectedCard.listing_id ?? "-"}</p>
+                <p className="safe-break">Auction ID: {selectedCard.auction_id ?? "-"}</p>
+              </div>
+              <p className="text-sm text-slate-300">Acquired: {new Date(selectedCard.created_at).toLocaleString()}</p>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
