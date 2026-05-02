@@ -12,3 +12,11 @@ export async function getPurchaseById(client: PoolClient, purchaseId: string, us
   const { rows } = await client.query("select * from pack_purchases where id=$1 and user_id=$2", [purchaseId, userId]);
   return rows[0] ?? null;
 }
+
+export async function getPurchaseByIdempotencyKey(client: PoolClient, userId: string, idempotencyKey: string) {
+  const { rows } = await client.query(
+    "select * from pack_purchases where user_id=$1 and idempotency_key=$2",
+    [userId, idempotencyKey]
+  );
+  return rows[0] ?? null;
+}

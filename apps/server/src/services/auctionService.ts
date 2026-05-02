@@ -6,6 +6,7 @@ import {
   closeExpiredAuctions,
   createAuction,
   fetchUnsettledClosedAuctions,
+  getBidByIdempotencyKey,
   getAuctionForUpdate,
   getBidHistory,
   insertBid,
@@ -60,53 +61,84 @@ export async function getLiveAuctions() {
 }
 
 export async function placeBid(userId: string, auctionId: string, amountStr: string, idempotencyKey: string) {
-  return withTx(async (client) => {
-    const auction = await getAuctionForUpdate(client, auctionId);
-    if (!auction) throw new Error("Auction not found");
-    if (!["LIVE", "CLOSING"].includes(auction.status)) throw new Error("Auction not live");
-
-    const now = new Date();
-    const endTime = new Date(auction.end_time);
-    if (endTime <= now) throw new Error("Auction ended");
-
-    const amount = new Decimal(amountStr);
-    const current = new Decimal(auction.current_bid);
-    const minBid = current.eq(0) ? new Decimal(1) : current.plus(minIncrement(current));
-    if (amount.lt(minBid)) throw new Error(`Bid too low. Minimum ${minBid.toFixed(2)}`);
-
-    await getBalanceForUpdate(client, userId);
-
-    if (auction.highest_bidder_id === userId) {
-      const delta = amount.minus(current);
-      await holdFunds(client, userId, delta);
-    } else {
-      await holdFunds(client, userId, amount);
-      if (auction.highest_bidder_id) {
-        await releaseFunds(client, auction.highest_bidder_id, current);
-        await createLedger(client, auction.highest_bidder_id, "BID_RELEASE", current.toFixed(2), auction.id);
+  try {
+    return await withTx(async (client) => {
+      const existing = await getBidByIdempotencyKey(client, userId, idempotencyKey);
+      if (existing) {
+        if (existing.auction_id !== auctionId) throw new Error("Idempotency key already used for a different auction");
+        const live = await getAuctionForUpdate(client, auctionId);
+        if (!live) throw new Error("Auction not found");
+        return {
+          auctionId,
+          highestBid: new Decimal(existing.amount).toFixed(2),
+          highestBidderId: existing.bidder_id,
+          endTime: new Date(live.end_time).toISOString()
+        };
       }
+
+      const auction = await getAuctionForUpdate(client, auctionId);
+      if (!auction) throw new Error("Auction not found");
+      if (!["LIVE", "CLOSING"].includes(auction.status)) throw new Error("Auction not live");
+
+      const now = new Date();
+      const endTime = new Date(auction.end_time);
+      if (endTime <= now) throw new Error("Auction ended");
+
+      const amount = new Decimal(amountStr);
+      const current = new Decimal(auction.current_bid);
+      const minBid = current.eq(0) ? new Decimal(1) : current.plus(minIncrement(current));
+      if (amount.lt(minBid)) throw new Error(`Bid too low. Minimum ${minBid.toFixed(2)}`);
+
+      await getBalanceForUpdate(client, userId);
+
+      if (auction.highest_bidder_id === userId) {
+        const delta = amount.minus(current);
+        await holdFunds(client, userId, delta);
+      } else {
+        await holdFunds(client, userId, amount);
+        if (auction.highest_bidder_id) {
+          await releaseFunds(client, auction.highest_bidder_id, current);
+          await createLedger(client, auction.highest_bidder_id, "BID_RELEASE", current.toFixed(2), auction.id);
+        }
+      }
+
+      const secondsLeft = Math.floor((endTime.getTime() - now.getTime()) / 1000);
+      let nextEndTime = endTime;
+      let status = auction.status;
+      let ext = Number(auction.anti_snipe_extensions);
+
+      if (secondsLeft <= ANTI_SNIPE_SECONDS && ext < ANTI_SNIPE_MAX_EXTENSIONS) {
+        nextEndTime = new Date(endTime.getTime() + ANTI_SNIPE_SECONDS * 1000);
+        status = "CLOSING";
+        ext += 1;
+      }
+
+      await client.query(
+        "update auctions set current_bid=$2, highest_bidder_id=$3, end_time=$4, anti_snipe_extensions=$5, status=$6 where id=$1",
+        [auctionId, amount.toFixed(2), userId, nextEndTime, ext, status]
+      );
+      await insertBid(client, auctionId, userId, amount.toFixed(2), idempotencyKey);
+      await createLedger(client, userId, "BID_HOLD", amount.toFixed(2), auction.id);
+
+      return { auctionId, highestBid: amount.toFixed(2), highestBidderId: userId, endTime: nextEndTime.toISOString() };
+    });
+  } catch (err) {
+    const client = await pool.connect();
+    try {
+      const existing = await getBidByIdempotencyKey(client, userId, idempotencyKey);
+      if (!existing) throw err;
+      if (existing.auction_id !== auctionId) throw new Error("Idempotency key already used for a different auction");
+      const live = await client.query("select end_time from auctions where id=$1", [auctionId]);
+      return {
+        auctionId,
+        highestBid: new Decimal(existing.amount).toFixed(2),
+        highestBidderId: existing.bidder_id,
+        endTime: new Date(live.rows[0]?.end_time ?? new Date()).toISOString()
+      };
+    } finally {
+      client.release();
     }
-
-    const secondsLeft = Math.floor((endTime.getTime() - now.getTime()) / 1000);
-    let nextEndTime = endTime;
-    let status = auction.status;
-    let ext = Number(auction.anti_snipe_extensions);
-
-    if (secondsLeft <= ANTI_SNIPE_SECONDS && ext < ANTI_SNIPE_MAX_EXTENSIONS) {
-      nextEndTime = new Date(endTime.getTime() + ANTI_SNIPE_SECONDS * 1000);
-      status = "CLOSING";
-      ext += 1;
-    }
-
-    await client.query(
-      "update auctions set current_bid=$2, highest_bidder_id=$3, end_time=$4, anti_snipe_extensions=$5, status=$6 where id=$1",
-      [auctionId, amount.toFixed(2), userId, nextEndTime, ext, status]
-    );
-    await insertBid(client, auctionId, userId, amount.toFixed(2), idempotencyKey);
-    await createLedger(client, userId, "BID_HOLD", amount.toFixed(2), auction.id);
-
-    return { auctionId, highestBid: amount.toFixed(2), highestBidderId: userId, endTime: nextEndTime.toISOString() };
-  });
+  }
 }
 
 export async function getAuctionSnapshot(auctionId: string, userId: string) {

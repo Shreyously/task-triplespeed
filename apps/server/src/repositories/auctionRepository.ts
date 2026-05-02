@@ -32,6 +32,14 @@ export async function insertBid(client: PoolClient, auctionId: string, bidderId:
   return rows[0];
 }
 
+export async function getBidByIdempotencyKey(client: PoolClient, bidderId: string, idempotencyKey: string) {
+  const { rows } = await client.query(
+    "select * from bids where bidder_id=$1 and idempotency_key=$2",
+    [bidderId, idempotencyKey]
+  );
+  return rows[0] ?? null;
+}
+
 export async function getBidHistory(client: PoolClient, auctionId: string) {
   const { rows } = await client.query(
     "select * from bids where auction_id=$1 order by created_at desc limit 25",

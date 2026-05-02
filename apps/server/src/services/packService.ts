@@ -1,7 +1,7 @@
 import Decimal from "decimal.js";
 import { pool, withTx } from "../db/pool";
 import { getDropForUpdate, listDrops, updateDrop } from "../repositories/dropRepository";
-import { createPackPurchase, getPurchaseById } from "../repositories/packRepository";
+import { createPackPurchase, getPurchaseById, getPurchaseByIdempotencyKey } from "../repositories/packRepository";
 import { createCard, getCardsByPurchase } from "../repositories/cardRepository";
 import { createLedger } from "../repositories/ledgerRepository";
 import { debitAvailable } from "./balanceService";
@@ -46,37 +46,57 @@ export async function getDrops() {
 export async function buyPack(userId: string, dropId: string, idempotencyKey: string) {
   const cardPool = await getCardPool();
   if (!cardPool.length) throw new Error("Card pool unavailable");
-  return withTx(async (client) => {
-    const drop = await getDropForUpdate(client, dropId);
-    if (!drop) throw new Error("Drop not found");
-    const now = new Date();
-    if (new Date(drop.starts_at) > now) throw new Error("Drop not live yet");
-    if (new Date(drop.ends_at) < now) throw new Error("Drop closed");
-    if (drop.inventory <= 0) throw new Error("Sold out");
+  try {
+    return await withTx(async (client) => {
+      const existing = await getPurchaseByIdempotencyKey(client, userId, idempotencyKey);
+      if (existing) {
+        if (existing.drop_id !== dropId) throw new Error("Idempotency key already used for a different drop");
+        const inv = await client.query("select inventory from drops where id=$1", [dropId]);
+        return { purchase: existing, remainingInventory: Number(inv.rows[0]?.inventory ?? 0) };
+      }
 
-    const price = new Decimal(drop.price);
-    await debitAvailable(client, userId, price);
-    const invResult = await client.query("update drops set inventory=inventory-1 where id=$1 returning inventory", [dropId]);
-    const purchase = await createPackPurchase(client, userId, dropId, price.toFixed(2), idempotencyKey);
+      const drop = await getDropForUpdate(client, dropId);
+      if (!drop) throw new Error("Drop not found");
+      const now = new Date();
+      if (new Date(drop.starts_at) > now) throw new Error("Drop not live yet");
+      if (new Date(drop.ends_at) < now) throw new Error("Drop closed");
+      if (drop.inventory <= 0) throw new Error("Sold out");
 
-    const cards = pickCards(Number(drop.cards_per_pack), cardPool, drop.rarity_weights ?? { Common: 1 });
-    for (const card of cards) {
-      const marketValue = priceForRarity(card.rarity).toFixed(2);
-      await createCard(client, {
-        purchaseId: purchase.id,
-        ownerId: userId,
-        name: card.name,
-        setName: card.setName,
-        rarity: card.rarity,
-        imageUrl: card.imageUrl,
-        marketValue,
-        acquisitionValue: marketValue
-      });
+      const price = new Decimal(drop.price);
+      await debitAvailable(client, userId, price);
+      const invResult = await client.query("update drops set inventory=inventory-1 where id=$1 returning inventory", [dropId]);
+      const purchase = await createPackPurchase(client, userId, dropId, price.toFixed(2), idempotencyKey);
+
+      const cards = pickCards(Number(drop.cards_per_pack), cardPool, drop.rarity_weights ?? { Common: 1 });
+      for (const card of cards) {
+        const marketValue = priceForRarity(card.rarity).toFixed(2);
+        await createCard(client, {
+          purchaseId: purchase.id,
+          ownerId: userId,
+          name: card.name,
+          setName: card.setName,
+          rarity: card.rarity,
+          imageUrl: card.imageUrl,
+          marketValue,
+          acquisitionValue: marketValue
+        });
+      }
+
+      await createLedger(client, userId, "PACK_PURCHASE", price.negated().toFixed(2), purchase.id);
+      return { purchase, remainingInventory: Number(invResult.rows[0].inventory) };
+    });
+  } catch (err) {
+    const client = await pool.connect();
+    try {
+      const purchase = await getPurchaseByIdempotencyKey(client, userId, idempotencyKey);
+      if (!purchase) throw err;
+      if (purchase.drop_id !== dropId) throw new Error("Idempotency key already used for a different drop");
+      const inv = await client.query("select inventory from drops where id=$1", [dropId]);
+      return { purchase, remainingInventory: Number(inv.rows[0]?.inventory ?? 0) };
+    } finally {
+      client.release();
     }
-
-    await createLedger(client, userId, "PACK_PURCHASE", price.negated().toFixed(2), purchase.id);
-    return { purchase, remainingInventory: Number(invResult.rows[0].inventory) };
-  });
+  }
 }
 
 export async function revealPack(userId: string, purchaseId: string) {
