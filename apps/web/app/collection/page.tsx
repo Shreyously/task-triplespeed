@@ -148,7 +148,9 @@ export default function CollectionPage() {
         }
       });
     })().catch(() => setMsg("Failed to load collection"));
-    return () => socket?.disconnect();
+    return () => {
+      socket?.disconnect();
+    };
   }, []);
 
   async function listCard(cardId: string) {
