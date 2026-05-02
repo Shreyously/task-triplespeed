@@ -7,8 +7,10 @@
     "build": "npm run build -w @pullvault/common && npm run build -w @pullvault/server && npm run build -w @pullvault/web",
     "test": "npm run test -w @pullvault/server"
   },
-  "devDependencies": {
-    "concurrently": "^9.0.1",
+  "dependencies": {
     "typescript": "^5.6.3"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
   }
 }
