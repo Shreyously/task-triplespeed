@@ -1,8 +1,7 @@
 import { useMemo } from 'react';
-import { FilterConfig } from '../collectionTypes';
-import { Card } from './useCollectionSort';
+import { FilterConfig, CollectionCard } from '../collectionTypes';
 
-export function useCollectionFilter(cards: Card[], filterConfig: FilterConfig) {
+export function useCollectionFilter(cards: CollectionCard[], filterConfig: FilterConfig) {
   const filteredCards = useMemo(() => {
     return cards.filter(card => {
       // Filter by rarity

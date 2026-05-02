@@ -6,7 +6,7 @@ import { SOCKET_EVENTS } from "@pullvault/common";
 import { FEES } from "@pullvault/common";
 import Link from "next/link";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
-import { SortConfig, FilterConfig, SortField } from "../../lib/collectionTypes";
+import { SortConfig, FilterConfig, SortField, CollectionCard } from "../../lib/collectionTypes";
 import { useCollectionSort } from "../../lib/hooks/useCollectionSort";
 import { useCollectionFilter } from "../../lib/hooks/useCollectionFilter";
 import { useCollectionPersistence } from "../../lib/hooks/useCollectionPersistence";
@@ -29,11 +29,10 @@ function errorToMessage(error: unknown, fallback = "Something went wrong") {
   }
   return fallback;
 }
-type Card = { id: string; name: string; set_name: string; rarity: string; image_url: string; market_value: string; acquisition_value: string; pnl: string; created_at: string; market_state?: string; listing_id?: string; auction_id?: string };
 type HistoryPoint = { value: string; at: string };
 
 export default function CollectionPage() {
-  const [cards, setCards] = useState<Card[]>([]);
+  const [cards, setCards] = useState<CollectionCard[]>([]);
   const [summary, setSummary] = useState({ cardsValue: "0.00", availableBalance: "0.00", heldBalance: "0.00", netWorth: "0.00" });
   const [msg, setMsg] = useState("");
   const [needsLogin, setNeedsLogin] = useState(false);
@@ -43,7 +42,7 @@ export default function CollectionPage() {
   const [listingCardId, setListingCardId] = useState("");
   const [auctioningCardId, setAuctioningCardId] = useState("");
   const [auctionDurationByCard, setAuctionDurationByCard] = useState<Record<string, string>>({});
-  const [selectedCard, setSelectedCard] = useState<Card | null>(null);
+  const [selectedCard, setSelectedCard] = useState<CollectionCard | null>(null);
   const [historyRange, setHistoryRange] = useState<"24h" | "7d" | "30d">("24h");
   const [history, setHistory] = useState<HistoryPoint[]>([]);
 
@@ -200,7 +199,7 @@ export default function CollectionPage() {
     return date.toLocaleDateString([], { month: "short", day: "numeric" });
   };
 
-  const renderMarketBadge = (card: Card) => {
+  const renderMarketBadge = (card: CollectionCard) => {
     if (card.market_state === "LISTED") return <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-400 ring-1 ring-inset ring-emerald-500/20">Listed</span>;
     if (card.market_state === "IN_AUCTION") return <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-400 ring-1 ring-inset ring-amber-500/20">In Auction</span>;
     return null;

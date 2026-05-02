@@ -1,18 +1,7 @@
 import { useMemo } from 'react';
-import { SortConfig } from '../collectionTypes';
+import { SortConfig, CollectionCard } from '../collectionTypes';
 
-export interface Card {
-  id: string;
-  name: string;
-  set_name: string;
-  rarity: string;
-  image_url: string;
-  market_value: string;
-  pnl: string;
-  created_at: string;
-}
-
-export function useCollectionSort(cards: Card[], sortConfig: SortConfig) {
+export function useCollectionSort(cards: CollectionCard[], sortConfig: SortConfig) {
   const sortedCards = useMemo(() => {
     const { field, direction } = sortConfig;
     const multiplier = direction === 'asc' ? 1 : -1;

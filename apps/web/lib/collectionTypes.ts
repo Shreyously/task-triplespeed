@@ -20,6 +20,21 @@ export interface CollectionViewState {
   filter: FilterConfig;
 }
 
+export interface CollectionCard {
+  id: string;
+  name: string;
+  set_name: string;
+  rarity: string;
+  image_url: string;
+  market_value: string;
+  acquisition_value: string;
+  pnl: string;
+  created_at: string;
+  market_state?: string;
+  listing_id?: string;
+  auction_id?: string;
+}
+
 export const RARITY_OPTIONS = [
   'Common',
   'Uncommon',
