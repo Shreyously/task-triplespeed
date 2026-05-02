@@ -116,7 +116,7 @@ export default function AuctionsPage() {
       }
     });
 
-    return () => socket.disconnect();
+    return () => { socket.disconnect(); };
   }, []);
 
   useEffect(() => {

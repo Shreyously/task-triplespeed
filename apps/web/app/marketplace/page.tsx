@@ -74,7 +74,7 @@ export default function MarketplacePage() {
       }
     });
 
-    return () => socket.disconnect();
+    return () => { socket.disconnect(); };
   }, []);
 
   async function buy(id: string) {
