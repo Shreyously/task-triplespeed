@@ -23,7 +23,14 @@ export async function bootstrapSchema() {
        ('Basic',5,3,180,now(),now()+ interval '2 hour','{"Common":0.72,"Uncommon":0.22,"Rare":0.05,"Holo Rare":0.01}'::jsonb),
        ('Pro',15,5,90,now(),now()+ interval '2 hour','{"Common":0.55,"Uncommon":0.25,"Rare":0.12,"Holo Rare":0.06,"Ultra Rare/EX/GX":0.02}'::jsonb),
        ('Elite',40,7,35,now(),now()+ interval '2 hour','{"Common":0.32,"Uncommon":0.24,"Rare":0.2,"Holo Rare":0.14,"Ultra Rare/EX/GX":0.08,"Secret Rare":0.02}'::jsonb)
-       on conflict do nothing`
+       on conflict (tier) do update
+       set
+         price = excluded.price,
+         cards_per_pack = excluded.cards_per_pack,
+         inventory = excluded.inventory,
+         starts_at = excluded.starts_at,
+         ends_at = excluded.ends_at,
+         rarity_weights = excluded.rarity_weights`
     );
   } finally {
     client.release();

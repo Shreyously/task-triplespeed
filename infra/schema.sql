@@ -31,12 +31,15 @@ create table if not exists drops (
   created_at timestamptz not null default now()
 );
 
+create unique index if not exists ux_drops_tier on drops(tier);
+
 create table if not exists pack_purchases (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references users(id),
   drop_id uuid not null references drops(id),
   price_paid numeric(18,2) not null,
-  idempotency_key text not null unique,
+  idempotency_key text not null,
+  unique (user_id, idempotency_key),
   created_at timestamptz not null default now()
 );
 
@@ -53,7 +56,12 @@ create table if not exists cards (
   created_at timestamptz not null default now()
 );
 
-create type market_state as enum ('NONE','LISTED','IN_AUCTION');
+do $$
+begin
+  create type market_state as enum ('NONE','LISTED','IN_AUCTION');
+exception
+  when duplicate_object then null;
+end $$;
 
 create table if not exists card_market_state (
   card_id uuid primary key references cards(id),
@@ -72,7 +80,12 @@ create table if not exists listings (
   created_at timestamptz not null default now()
 );
 
-create type auction_status as enum ('SCHEDULED','LIVE','CLOSING','CLOSED','SETTLED');
+do $$
+begin
+  create type auction_status as enum ('SCHEDULED','LIVE','CLOSING','CLOSED','SETTLED');
+exception
+  when duplicate_object then null;
+end $$;
 
 create table if not exists auctions (
   id uuid primary key default gen_random_uuid(),
@@ -93,7 +106,8 @@ create table if not exists bids (
   auction_id uuid not null references auctions(id),
   bidder_id uuid not null references users(id),
   amount numeric(18,2) not null,
-  idempotency_key text not null unique,
+  idempotency_key text not null,
+  unique (bidder_id, idempotency_key),
   created_at timestamptz not null default now()
 );
 
@@ -104,7 +118,8 @@ create table if not exists trade_transactions (
   seller_id uuid not null references users(id),
   gross_amount numeric(18,2) not null,
   fee_amount numeric(18,2) not null,
-  idempotency_key text not null unique,
+  idempotency_key text not null,
+  unique (buyer_id, idempotency_key),
   created_at timestamptz not null default now()
 );
 

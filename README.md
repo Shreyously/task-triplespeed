@@ -43,6 +43,16 @@ Optional: run SQL migrations (safe to re-run)
 npm run db:migrate -w @pullvault/server
 ```
 
+Optional: load drop seed data
+```bash
+npm run db:seed -w @pullvault/server
+```
+
+If test runs leave duplicate/test drops, clean them up:
+```bash
+npm run db:cleanup:test -w @pullvault/server
+```
+
 4. Start web + server
 ```bash
 npm run dev
@@ -50,6 +60,17 @@ npm run dev
 
 - Web: `http://localhost:3000`
 - API/Socket: `http://localhost:4000`
+
+## Concurrency Tests (Jest)
+1. Copy `apps/server/.env.test.example` to `apps/server/.env.test` and point it to isolated Postgres/Redis instances.
+2. Run tests:
+```bash
+npm run test -w @pullvault/server
+```
+3. Run only race-condition suite:
+```bash
+npm run test:concurrency -w @pullvault/server
+```
 
 ## API Surface
 - `POST /auth/signup`
