@@ -5,6 +5,7 @@ import { API_BASE, SOCKET_BASE, uuid } from "../../lib/config";
 import { SOCKET_EVENTS } from "@pullvault/common";
 import { FEES } from "@pullvault/common";
 import Link from "next/link";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { SortConfig, FilterConfig, SortField } from "../../lib/collectionTypes";
 import { useCollectionSort } from "../../lib/hooks/useCollectionSort";
 import { useCollectionFilter } from "../../lib/hooks/useCollectionFilter";
@@ -29,6 +30,7 @@ function errorToMessage(error: unknown, fallback = "Something went wrong") {
   return fallback;
 }
 type Card = { id: string; name: string; set_name: string; rarity: string; image_url: string; market_value: string; acquisition_value: string; pnl: string; created_at: string; market_state?: string; listing_id?: string; auction_id?: string };
+type HistoryPoint = { value: string; at: string };
 
 export default function CollectionPage() {
   const [cards, setCards] = useState<Card[]>([]);
@@ -42,6 +44,8 @@ export default function CollectionPage() {
   const [auctioningCardId, setAuctioningCardId] = useState("");
   const [auctionDurationByCard, setAuctionDurationByCard] = useState<Record<string, string>>({});
   const [selectedCard, setSelectedCard] = useState<Card | null>(null);
+  const [historyRange, setHistoryRange] = useState<"24h" | "7d" | "30d">("24h");
+  const [history, setHistory] = useState<HistoryPoint[]>([]);
 
   useCollectionPersistence(sortConfig, filterConfig, setSortConfig, setFilterConfig);
 
@@ -50,6 +54,27 @@ export default function CollectionPage() {
     const timer = setTimeout(() => setMsg(""), 5000);
     return () => clearTimeout(timer);
   }, [msg]);
+
+  useEffect(() => {
+    let active = true;
+    const fetchHistory = async () => {
+      const token = localStorage.getItem("token") || "";
+      if (!token) return;
+      try {
+        const res = await fetch(`${API_BASE}/portfolio/history?range=${historyRange}`, { headers: { authorization: `Bearer ${token}` } });
+        const data = await res.json();
+        if (active) setHistory(data.points ?? []);
+      } catch {
+        if (active) setHistory([]);
+      }
+    };
+    fetchHistory();
+    const timer = setInterval(fetchHistory, 30000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [historyRange]);
 
   useEffect(() => {
     let socket: ReturnType<typeof io> | null = null;
@@ -157,6 +182,21 @@ export default function CollectionPage() {
   const availableRarities = useMemo(() => [...new Set(cards.map((c) => c.rarity))], [cards]);
   const availableSets = useMemo(() => [...new Set(cards.map((c) => c.set_name))], [cards]);
   const totalFilteredValue = useMemo(() => sortedCards.reduce((sum, card) => sum + Number(card.market_value), 0).toFixed(2), [sortedCards]);
+  const historyChange = useMemo(() => {
+    if (history.length < 2) return { abs: "0.00", pct: "0.00" };
+    const start = Number(history[0].value);
+    const end = Number(history[history.length - 1].value);
+    const abs = (end - start).toFixed(2);
+    const pct = start > 0 ? (((end - start) / start) * 100).toFixed(2) : "0.00";
+    return { abs, pct };
+  }, [history]);
+
+  const chartData = useMemo(() => history.map((h) => ({ value: Number(h.value), at: new Date(h.at).getTime() })), [history]);
+  const xTickFormat = (ts: number) => {
+    const date = new Date(ts);
+    if (historyRange === "24h") return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  };
 
   const renderMarketBadge = (card: Card) => {
     if (card.market_state === "LISTED") return <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-400 ring-1 ring-inset ring-emerald-500/20">Listed</span>;
@@ -183,6 +223,64 @@ export default function CollectionPage() {
             <div className="card"><p>Available</p><p className="text-xl font-semibold sm:text-2xl">${summary.availableBalance}</p></div>
             <div className="card"><p>Held</p><p className="text-xl font-semibold sm:text-2xl">${summary.heldBalance}</p></div>
             <div className="card"><p>Net Worth</p><p className="text-xl font-semibold sm:text-2xl">${summary.netWorth}</p></div>
+          </div>
+
+          <div className="card space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-lg font-semibold">Portfolio Performance</h2>
+              <div className="flex gap-2">
+                {(["24h", "7d", "30d"] as const).map((range) => (
+                  <button
+                    key={range}
+                    className={`touch-btn ${historyRange === range ? "bg-cyan-500 text-slate-900" : "bg-slate-200 text-slate-900"}`}
+                    onClick={() => setHistoryRange(range)}
+                  >
+                    {range}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <p className={`text-sm ${Number(historyChange.abs) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+              {Number(historyChange.abs) >= 0 ? "+" : ""}${historyChange.abs} ({Number(historyChange.pct) >= 0 ? "+" : ""}{historyChange.pct}%)
+            </p>
+            {history.length < 2 ? (
+              <p className="text-sm text-slate-400">Not enough data yet. Snapshot worker fills this over time.</p>
+            ) : (
+              <div className="rounded bg-slate-800/40 p-2">
+                <div className="h-48 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={chartData} margin={{ top: 10, right: 8, left: 0, bottom: 8 }}>
+                      <CartesianGrid stroke="#334155" strokeDasharray="3 3" />
+                      <XAxis
+                        dataKey="at"
+                        type="number"
+                        domain={["dataMin", "dataMax"]}
+                        tickFormatter={xTickFormat}
+                        tick={{ fill: "#94a3b8", fontSize: 12 }}
+                        stroke="#475569"
+                      />
+                      <YAxis
+                        dataKey="value"
+                        tickFormatter={(v) => `$${Number(v).toFixed(0)}`}
+                        tick={{ fill: "#94a3b8", fontSize: 12 }}
+                        stroke="#475569"
+                        width={52}
+                      />
+                      <Tooltip
+                        labelFormatter={(value) => new Date(Number(value)).toLocaleString()}
+                        formatter={(value) => [`$${Number(value).toFixed(2)}`, "Net Worth"]}
+                        contentStyle={{ backgroundColor: "#0f172a", border: "1px solid #334155", borderRadius: "0.5rem", color: "#e2e8f0" }}
+                      />
+                      <Line dataKey="value" type="monotone" stroke="#22d3ee" strokeWidth={2} dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="flex justify-between text-xs text-slate-400">
+                  <span>{new Date(history[0].at).toLocaleString()}</span>
+                  <span>{new Date(history[history.length - 1].at).toLocaleString()}</span>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">

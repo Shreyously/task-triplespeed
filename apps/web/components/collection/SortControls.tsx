@@ -16,7 +16,7 @@ export function SortControls({ currentSort, onSortChange, onDirectionToggle }: S
         ))}
       </select>
       <button className="touch-btn w-full bg-slate-700 hover:bg-slate-600" onClick={onDirectionToggle}>
-        {currentSort.direction === 'asc' ? '? Ascending' : '? Descending'}
+        {currentSort.direction === 'asc' ? 'Ascending' : 'Descending'}
       </button>
     </div>
   );
