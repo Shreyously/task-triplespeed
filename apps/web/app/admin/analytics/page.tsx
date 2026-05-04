@@ -2,21 +2,8 @@
 import { useEffect, useState } from "react";
 import { API_BASE } from "../../../lib/config";
 import {
-  RevenueBreakdown,
-  PackEVAnalysis,
-  TransactionVolumes,
-  PlatformProfitability,
-  MarketStats
+  AnalyticsDashboardData
 } from "@pullvault/common";
-
-type AnalyticsData = {
-  revenue: RevenueBreakdown;
-  evAnalysis: PackEVAnalysis[];
-  volumes: TransactionVolumes;
-  profitability: PlatformProfitability;
-  marketStats: MarketStats[];
-  generatedAt: string;
-};
 
 function MetricCard({ label, value, highlight = false }: { label: string; value: string | number; highlight?: boolean }) {
   return (
@@ -28,7 +15,7 @@ function MetricCard({ label, value, highlight = false }: { label: string; value:
 }
 
 export default function AnalyticsDashboard() {
-  const [data, setData] = useState<AnalyticsData | null>(null);
+  const [data, setData] = useState<AnalyticsDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -101,6 +88,19 @@ export default function AnalyticsDashboard() {
         </div>
       </section>
 
+      <section className="card space-y-4">
+        <h2 className="text-xl font-semibold">Auction Integrity</h2>
+        <div className="grid gap-4 md:grid-cols-4">
+          <MetricCard label="Participation Rate" value={`${data.auctionIntegrity.participationRate}%`} />
+          <MetricCard label="Avg Bidders" value={data.auctionIntegrity.averageBidders} />
+          <MetricCard label="Sealed Endgame Rate" value={`${data.auctionIntegrity.sealedEndgameRate}%`} />
+          <MetricCard label="Flag Rate" value={`${data.auctionIntegrity.flagRate}%`} highlight={data.auctionIntegrity.flagRate > 0} />
+          <MetricCard label="Low Close Rate" value={`${data.auctionIntegrity.lowCloseRate}%`} />
+          <MetricCard label="Snipe Rate" value={`${data.auctionIntegrity.snipeRate}%`} />
+          <MetricCard label="Review Flags" value={data.auctionIntegrity.auctionsReviewed} />
+        </div>
+      </section>
+
       {/* Pack EV Analysis */}
       <section className="card space-y-4">
         <h2 className="text-xl font-semibold">Pack Expected Value Analysis</h2>
@@ -167,6 +167,29 @@ export default function AnalyticsDashboard() {
                 <p>Range: ${stat.minValue} - ${stat.maxValue}</p>
                 <p>Cards: {stat.cardCount}</p>
               </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="card space-y-4">
+        <h2 className="text-xl font-semibold">Flagged Auctions Review Queue</h2>
+        {data.flaggedAuctions.length === 0 && (
+          <p className="text-sm text-slate-400">No auction integrity flags have been raised yet.</p>
+        )}
+        <div className="space-y-3">
+          {data.flaggedAuctions.map((flag) => (
+            <div key={flag.id} className="rounded border border-slate-700 p-3 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="font-semibold">{flag.flagType}</p>
+                <p className="text-slate-400">Severity {flag.severity}</p>
+              </div>
+              <p>Auction: {flag.auctionId}</p>
+              <p>Status: {flag.status}</p>
+              <p>Final vs Market: ${flag.finalPrice ?? "0.00"} / ${flag.marketValue ?? "0.00"}</p>
+              <p>Winner: {flag.winnerId ? `${flag.winnerId.slice(0, 8)}...` : "None"}</p>
+              <p>Bidders: {flag.bidderCount}</p>
+              <p className="text-slate-400">Flagged at {new Date(flag.createdAt).toLocaleString()}</p>
             </div>
           ))}
         </div>

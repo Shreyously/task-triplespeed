@@ -6,11 +6,90 @@ import { config } from "../../src/config/env";
 
 const CARD_POOL_CACHE_KEY = "tcg:card-pool:v1";
 
+async function ensureAuctionIntegritySchema(client: PoolClient) {
+  await client.query(`
+    do $$
+    begin
+      begin
+        alter type auction_status add value 'SEALED_ENDGAME';
+      exception
+        when duplicate_object then null;
+        when invalid_parameter_value then null;
+      end;
+    end $$;
+  `);
+
+  await client.query(`
+    alter table auctions
+      add column if not exists sealed_phase_started_at timestamptz,
+      add column if not exists sealed_phase_ends_at timestamptz,
+      add column if not exists sealed_bid_floor numeric(18,2),
+      add column if not exists final_clearing_price numeric(18,2),
+      add column if not exists winning_max_bid numeric(18,2)
+  `);
+
+  await client.query(`
+    create table if not exists sealed_bids (
+      id uuid primary key default gen_random_uuid(),
+      auction_id uuid not null references auctions(id),
+      bidder_id uuid not null references users(id),
+      max_bid_amount numeric(18,2) not null,
+      confirmed_high_bid boolean not null default false,
+      idempotency_key text not null,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      unique (auction_id, bidder_id),
+      unique (bidder_id, idempotency_key)
+    )
+  `);
+
+  await client.query(`
+    alter table auction_settlements
+      add column if not exists winning_max_bid numeric(18,2),
+      add column if not exists final_clearing_price numeric(18,2)
+  `);
+
+  await client.query(`
+    create table if not exists auction_integrity_flags (
+      id uuid primary key default gen_random_uuid(),
+      auction_id uuid not null references auctions(id),
+      flag_type text not null,
+      severity int not null default 1,
+      details jsonb not null default '{}'::jsonb,
+      status text not null default 'OPEN',
+      created_at timestamptz not null default now()
+    )
+  `);
+}
+
 export async function resetTestData() {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("truncate table bids, auction_settlements, auctions, trade_transactions, listings, card_market_state, cards, pack_purchases, ledger, portfolio_snapshots restart identity cascade");
+    await ensureAuctionIntegritySchema(client);
+    const existingTables = await client.query<{ table_name: string }>(`
+      select table_name
+      from information_schema.tables
+      where table_schema = 'public'
+        and table_name = any($1::text[])
+    `, [[
+      "auction_integrity_flags",
+      "sealed_bids",
+      "bids",
+      "auction_settlements",
+      "auctions",
+      "trade_transactions",
+      "listings",
+      "card_market_state",
+      "cards",
+      "pack_purchases",
+      "ledger",
+      "portfolio_snapshots"
+    ]]);
+    const tableList = existingTables.rows.map((row) => row.table_name);
+    if (tableList.length > 0) {
+      await client.query(`truncate table ${tableList.join(", ")} restart identity cascade`);
+    }
     await client.query("delete from balances where user_id <> $1", [config.platformUserId]);
     await client.query("delete from users where id <> $1", [config.platformUserId]);
     await client.query(
@@ -30,6 +109,7 @@ export async function resetTestData() {
     client.release();
   }
 
+  await redis.flushdb();
   await redis.del(CARD_POOL_CACHE_KEY);
 }
 

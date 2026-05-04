@@ -3,6 +3,7 @@ export const SOCKET_EVENTS = {
   AUCTION_UPDATED: "auction:updated",
   AUCTION_CLOSED: "auction:closed",
   AUCTION_BID_HISTORY: "auction:bid:history",
+  AUCTION_SEALED_STATUS: "auction:sealed:status",
   AUCTION_WATCHERS_UPDATED: "auction:watchers:updated",
   PRICE_CARD_UPDATED: "price:card:updated",
   PORTFOLIO_UPDATED: "portfolio:updated",

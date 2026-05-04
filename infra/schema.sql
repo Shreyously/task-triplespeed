@@ -82,7 +82,7 @@ create table if not exists listings (
 
 do $$
 begin
-  create type auction_status as enum ('SCHEDULED','LIVE','CLOSING','CLOSED','SETTLED');
+  create type auction_status as enum ('SCHEDULED','LIVE','CLOSING','SEALED_ENDGAME','CLOSED','SETTLED');
 exception
   when duplicate_object then null;
 end $$;
@@ -97,6 +97,11 @@ create table if not exists auctions (
   current_bid numeric(18,2) not null default 0,
   highest_bidder_id uuid,
   anti_snipe_extensions int not null default 0,
+  sealed_phase_started_at timestamptz,
+  sealed_phase_ends_at timestamptz,
+  sealed_bid_floor numeric(18,2),
+  final_clearing_price numeric(18,2),
+  winning_max_bid numeric(18,2),
   settled boolean not null default false,
   created_at timestamptz not null default now()
 );
@@ -109,6 +114,19 @@ create table if not exists bids (
   idempotency_key text not null,
   unique (bidder_id, idempotency_key),
   created_at timestamptz not null default now()
+);
+
+create table if not exists sealed_bids (
+  id uuid primary key default gen_random_uuid(),
+  auction_id uuid not null references auctions(id),
+  bidder_id uuid not null references users(id),
+  max_bid_amount numeric(18,2) not null,
+  confirmed_high_bid boolean not null default false,
+  idempotency_key text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (auction_id, bidder_id),
+  unique (bidder_id, idempotency_key)
 );
 
 create table if not exists trade_transactions (
@@ -128,8 +146,20 @@ create table if not exists auction_settlements (
   auction_id uuid not null unique references auctions(id),
   winner_id uuid,
   gross_amount numeric(18,2),
+  winning_max_bid numeric(18,2),
+  final_clearing_price numeric(18,2),
   fee_amount numeric(18,2),
   idempotency_key text not null unique,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists auction_integrity_flags (
+  id uuid primary key default gen_random_uuid(),
+  auction_id uuid not null references auctions(id),
+  flag_type text not null,
+  severity int not null default 1,
+  details jsonb not null default '{}'::jsonb,
+  status text not null default 'OPEN',
   created_at timestamptz not null default now()
 );
 

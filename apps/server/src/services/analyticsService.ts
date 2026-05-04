@@ -1,5 +1,7 @@
-import { pool, withTx } from "../db/pool";
+import { pool } from "../db/pool";
 import {
+  getAuctionIntegrityMetrics,
+  getFlaggedAuctions,
   getRevenueBreakdown,
   getPackEVAnalysis,
   getTransactionVolumes,
@@ -10,10 +12,20 @@ import {
 export async function getEconomicsDashboard(platformUserId: string) {
   const client = await pool.connect();
   try {
-    const [revenue, evAnalysis, volumes, profitability, marketStats] = await Promise.all([
+    const [
+      auctionIntegrity,
+      flaggedAuctions,
+      revenue,
+      evAnalysis,
+      volumes,
+      profitability,
+      marketStats
+    ] = await Promise.all([
+      getAuctionIntegrityMetrics(client),
+      getFlaggedAuctions(client),
       getRevenueBreakdown(client, platformUserId),
       getPackEVAnalysis(client),
-      getTransactionVolumes(client, '24h'),
+      getTransactionVolumes(client, "24h"),
       getPlatformProfitability(client, platformUserId),
       getMarketStats(client)
     ]);
@@ -24,9 +36,11 @@ export async function getEconomicsDashboard(platformUserId: string) {
       volumes,
       profitability,
       marketStats,
+      auctionIntegrity,
+      flaggedAuctions,
       generatedAt: new Date().toISOString()
     };
   } finally {
     client.release();
-  };
+  }
 }

@@ -1,4 +1,4 @@
-export type AuctionStatus = "SCHEDULED" | "LIVE" | "CLOSING" | "CLOSED" | "SETTLED";
+export type AuctionStatus = "SCHEDULED" | "LIVE" | "CLOSING" | "SEALED_ENDGAME" | "CLOSED" | "SETTLED";
 export type CardMarketState = "NONE" | "LISTED" | "IN_AUCTION";
 export type LedgerType =
   | "PACK_PURCHASE"
@@ -61,4 +61,40 @@ export interface MarketStats {
   minValue: string;
   maxValue: string;
   cardCount: number;
+}
+
+export interface AuctionIntegrityMetrics {
+  participationRate: number;
+  averageBidders: number;
+  sealedEndgameRate: number;
+  lowCloseRate: number;
+  flagRate: number;
+  snipeRate: number;
+  auctionsReviewed: number;
+}
+
+export interface AuctionIntegrityFlagSummary {
+  id: string;
+  auctionId: string;
+  flagType: string;
+  severity: number;
+  details: Record<string, unknown>;
+  createdAt: string;
+  status: string;
+  sellerId: string;
+  winnerId: string | null;
+  finalPrice: string | null;
+  marketValue: string | null;
+  bidderCount: number;
+}
+
+export interface AnalyticsDashboardData {
+  revenue: RevenueBreakdown;
+  evAnalysis: PackEVAnalysis[];
+  volumes: TransactionVolumes;
+  profitability: PlatformProfitability;
+  marketStats: MarketStats[];
+  auctionIntegrity: AuctionIntegrityMetrics;
+  flaggedAuctions: AuctionIntegrityFlagSummary[];
+  generatedAt: string;
 }

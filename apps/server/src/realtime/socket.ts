@@ -42,6 +42,10 @@ export function emitAuctionBidHistory(auctionId: string, payload: unknown) {
   io?.to(`auction:${auctionId}`).emit(SOCKET_EVENTS.AUCTION_BID_HISTORY, payload);
 }
 
+export function emitAuctionSealedStatus(auctionId: string, payload: unknown) {
+  io?.to(`auction:${auctionId}`).emit(SOCKET_EVENTS.AUCTION_SEALED_STATUS, payload);
+}
+
 export function emitAuctionWatchers(auctionId: string, count: number) {
   io?.to(`auction:${auctionId}`).emit(SOCKET_EVENTS.AUCTION_WATCHERS_UPDATED, { auctionId, watchers: count });
 }

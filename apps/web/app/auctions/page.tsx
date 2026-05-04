@@ -83,9 +83,14 @@ export default function AuctionsPage() {
           refreshLiveAuctions(false);
           return prev;
         }
-        return prev.map((a) => a.id === p.auctionId ? { ...a, current_bid: p.highestBid, end_time: p.endTime } : a);
+        return prev.map((a) => a.id === p.auctionId ? { ...a, current_bid: p.highestBid, end_time: p.endTime, status: p.status, bidding_mode: p.biddingMode ?? a.bidding_mode } : a);
       });
-      setSelected((prev: any) => prev && prev.auction?.id === p.auctionId ? { ...prev, auction: { ...prev.auction, current_bid: p.highestBid, end_time: p.endTime } } : prev);
+      setSelected((prev: any) => prev && prev.auction?.id === p.auctionId ? { ...prev, auction: { ...prev.auction, current_bid: p.highestBid, end_time: p.endTime, status: p.status, bidding_mode: p.biddingMode ?? prev.auction.bidding_mode }, minimumBid: p.minimumBid ?? prev.minimumBid } : prev);
+      setSyncedAt(new Date().toLocaleTimeString());
+    });
+    socket.on(SOCKET_EVENTS.AUCTION_SEALED_STATUS, (payload: any) => {
+      setAuctions((prev) => prev.map((a) => a.id === payload.auctionId ? { ...a, status: payload.status, bidding_mode: payload.biddingMode, end_time: payload.endTime ?? a.end_time } : a));
+      setSelected((prev: any) => prev && prev.auction?.id === payload.auctionId ? { ...prev, auction: { ...prev.auction, status: payload.status, bidding_mode: payload.biddingMode, end_time: payload.endTime ?? prev.auction.end_time } } : prev);
       setSyncedAt(new Date().toLocaleTimeString());
     });
     socket.on(SOCKET_EVENTS.AUCTION_BID_HISTORY, (payload) => setSelected((prev: any) => prev && prev.auction?.id === payload.auctionId ? { ...prev, bidHistory: payload.bids } : prev));
@@ -133,10 +138,22 @@ export default function AuctionsPage() {
     setBiddingAuctionId(id);
     const amount = (bidInput[id] || current).toString();
     const token = localStorage.getItem("token") || "";
-    const key = uuid();
-    const r = await fetch(`${API_BASE}/auctions/${id}/bids`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}`, "idempotency-key": key }, body: JSON.stringify({ amount, idempotencyKey: key }) });
+    let key = uuid();
+    let r = await fetch(`${API_BASE}/auctions/${id}/bids`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}`, "idempotency-key": key }, body: JSON.stringify({ amount, idempotencyKey: key }) });
     const data = await r.json();
-    setMsg(r.ok ? `Bid placed at $${amount}` : errorToMessage(data?.error, "Failed to place bid"));
+    if (r.status === 409 && data?.confirmationRequired) {
+      const confirmed = window.confirm(`${data.message}. Confirm ${data.mode === "SEALED" ? "sealed max bid" : "bid"} of $${amount}?`);
+      if (confirmed) {
+        key = uuid();
+        r = await fetch(`${API_BASE}/auctions/${id}/bids`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}`, "idempotency-key": key }, body: JSON.stringify({ amount, idempotencyKey: key, confirmHighBid: true }) });
+        const confirmedData = await r.json();
+        setMsg(r.ok ? (confirmedData.mode === "SEALED" ? `Hidden max bid saved at $${amount}` : `Bid placed at $${amount}`) : errorToMessage(confirmedData?.error, "Failed to place bid"));
+      } else {
+        setMsg("High bid cancelled.");
+      }
+    } else {
+      setMsg(r.ok ? (data.mode === "SEALED" ? `Hidden max bid saved at $${amount}` : `Bid placed at $${amount}`) : errorToMessage(data?.error, "Failed to place bid"));
+    }
     if (r.ok) await openRoom(id);
     setBiddingAuctionId("");
   }
@@ -158,6 +175,7 @@ export default function AuctionsPage() {
   function statusClass(status: string) {
     if (status === "LIVE") return "bg-emerald-500 text-slate-950";
     if (status === "CLOSING") return "bg-amber-400 text-slate-950";
+    if (status === "SEALED_ENDGAME") return "bg-fuchsia-500 text-white";
     if (status === "CLOSED") return "bg-rose-500 text-white";
     if (status === "SETTLED") return "bg-cyan-500 text-slate-950";
     return "bg-slate-500 text-white";
@@ -178,8 +196,9 @@ export default function AuctionsPage() {
             <p className="safe-break text-sm text-slate-300">{a.set_name} - {a.rarity}</p>
             <p className="text-sm">Market: ${a.market_value}</p>
             <p className="safe-break text-sm">Auction: {a.id}</p>
-            <p>Current bid: ${a.current_bid}</p>
+            <p>{a.bidding_mode === "SEALED" ? "Visible floor" : "Current bid"}: ${a.current_bid}</p>
             <p>Ends: {new Date(a.end_time).toLocaleTimeString()}</p>
+            <p className="text-xs text-slate-400">Mode: {a.bidding_mode === "SEALED" ? "Sealed endgame" : "Open bidding"}</p>
             <p className="text-xs text-slate-400">
               Platform fee on successful sale: {(FEES.AUCTION_FEE_RATE * 100).toFixed(0)}%
             </p>
@@ -204,15 +223,24 @@ export default function AuctionsPage() {
           {selected.auction.image_url && <img src={selected.auction.image_url} alt={selected.auction.card_name} className="safe-media h-40 w-40 rounded" />}
           <p className="safe-break font-semibold">{selected.auction.card_name}</p>
           <p className="safe-break text-sm text-slate-300">{selected.auction.set_name} - {selected.auction.rarity}</p>
+          <p className="text-sm text-slate-300">
+            {selected.auction.bidding_mode === "SEALED"
+              ? "Sealed endgame is active. Other bidders' max bids are hidden until settlement."
+              : "Open ascending bidding is active."}
+          </p>
           <div className="grid gap-2 text-sm sm:grid-cols-2">
             <p className="safe-break rounded bg-slate-800/60 px-3 py-2">Market: ${selected.auction.market_value}</p>
             <p className="safe-break rounded bg-slate-800/60 px-3 py-2">Server countdown: {countdown}s</p>
             <p className="safe-break rounded bg-slate-800/60 px-3 py-2">Minimum valid bid: ${selected.minimumBid ?? "1.00"}</p>
             <p className="safe-break rounded bg-slate-800/60 px-3 py-2">Watchers: {selected.watcherCount ?? 0}</p>
             <p className="safe-break rounded bg-slate-800/60 px-3 py-2 sm:col-span-2">Your held funds: ${selected.yourHeld}</p>
+            <p className="safe-break rounded bg-slate-800/60 px-3 py-2 sm:col-span-2">Your sealed max: {selected.yourSealedMaxBid ? `$${selected.yourSealedMaxBid}` : "Not set"}</p>
             <p className="safe-break rounded bg-slate-800/60 px-3 py-2 sm:col-span-2">Platform fee on sale: {(FEES.AUCTION_FEE_RATE * 100).toFixed(0)}%</p>
           </div>
           <h3 className="font-medium">Bid History</h3>
+          {selected.auction.bidding_mode === "SEALED" ? (
+            <p className="text-sm text-slate-400">Open bid history is shown below, but sealed max bids remain hidden until the auction settles.</p>
+          ) : null}
           <ul className="space-y-1 text-sm">
             {(selected.bidHistory ?? []).map((b: any) => <li key={b.id} className="safe-break">{new Date(b.created_at).toLocaleTimeString()} - ${b.amount} by {b.bidder_id.slice(0, 8)}...</li>)}
           </ul>
@@ -221,6 +249,8 @@ export default function AuctionsPage() {
               <p className="font-semibold">Final Settlement</p>
               <p className="safe-break">Winner: {selected.settlement.winner_id ? `${selected.settlement.winner_id.slice(0, 8)}...` : "No bids"}</p>
               <p>Final Price: ${selected.settlement.gross_amount ?? "0.00"}</p>
+              <p>Winning Max: ${selected.settlement.winning_max_bid ?? "0.00"}</p>
+              <p>Clearing Price: ${selected.settlement.final_clearing_price ?? selected.settlement.gross_amount ?? "0.00"}</p>
               <p>Platform Fee: ${selected.settlement.fee_amount ?? "0.00"}</p>
             </div>
           )}

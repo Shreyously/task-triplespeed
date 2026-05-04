@@ -216,3 +216,99 @@ export async function getMarketStats(client: PoolClient) {
     cardCount: row.card_count || 0
   }));
 }
+
+export async function getAuctionIntegrityMetrics(client: PoolClient) {
+  const [summaryResult, flagCountResult] = await Promise.all([
+    client.query(`
+      with auction_bidders as (
+        select auction_id, count(distinct bidder_id)::numeric as bidder_count
+        from (
+          select auction_id, bidder_id from bids
+          union all
+          select auction_id, bidder_id from sealed_bids
+        ) s
+        group by auction_id
+      )
+      select
+        count(*)::numeric as total_auctions,
+        coalesce(avg(case when a.current_bid > 0 then 1 else 0 end), 0) as participation_rate,
+        coalesce(avg(coalesce(ab.bidder_count, 0)), 0) as avg_bidders,
+        coalesce(avg(case when a.sealed_phase_started_at is not null then 1 else 0 end), 0) as sealed_rate,
+        coalesce(avg(case when a.anti_snipe_extensions > 0 then 1 else 0 end), 0) as snipe_rate,
+        coalesce(avg(
+          case
+            when s.gross_amount is not null and c.market_value > 0 and s.gross_amount / c.market_value < $1
+            then 1 else 0
+          end
+        ), 0) as low_close_rate
+      from auctions a
+      join cards c on c.id = a.card_id
+      left join auction_settlements s on s.auction_id = a.id
+      left join auction_bidders ab on ab.auction_id = a.id
+    `, [0.65]),
+    client.query(`select count(*)::numeric as flag_count from auction_integrity_flags`)
+  ]);
+
+  const summary = summaryResult.rows[0];
+  const totalAuctions = Number(summary?.total_auctions ?? 0);
+  const flagCount = Number(flagCountResult.rows[0]?.flag_count ?? 0);
+
+  return {
+    participationRate: Number((Number(summary?.participation_rate ?? 0) * 100).toFixed(2)),
+    averageBidders: Number(Number(summary?.avg_bidders ?? 0).toFixed(2)),
+    sealedEndgameRate: Number((Number(summary?.sealed_rate ?? 0) * 100).toFixed(2)),
+    lowCloseRate: Number((Number(summary?.low_close_rate ?? 0) * 100).toFixed(2)),
+    flagRate: totalAuctions > 0 ? Number(((flagCount / totalAuctions) * 100).toFixed(2)) : 0,
+    snipeRate: Number((Number(summary?.snipe_rate ?? 0) * 100).toFixed(2)),
+    auctionsReviewed: flagCount
+  };
+}
+
+export async function getFlaggedAuctions(client: PoolClient) {
+  const { rows } = await client.query(`
+    with bidder_stats as (
+      select auction_id, count(distinct bidder_id)::int as bidder_count
+      from (
+        select auction_id, bidder_id from bids
+        union all
+        select auction_id, bidder_id from sealed_bids
+      ) s
+      group by auction_id
+    )
+    select
+      f.id,
+      f.auction_id,
+      f.flag_type,
+      f.severity,
+      f.details,
+      f.created_at,
+      f.status,
+      a.seller_id,
+      s.winner_id,
+      s.gross_amount as final_price,
+      c.market_value,
+      coalesce(bs.bidder_count, 0) as bidder_count
+    from auction_integrity_flags f
+    join auctions a on a.id = f.auction_id
+    join cards c on c.id = a.card_id
+    left join auction_settlements s on s.auction_id = a.id
+    left join bidder_stats bs on bs.auction_id = a.id
+    order by f.created_at desc
+    limit 25
+  `);
+
+  return rows.map((row) => ({
+    id: row.id,
+    auctionId: row.auction_id,
+    flagType: row.flag_type,
+    severity: Number(row.severity),
+    details: row.details ?? {},
+    createdAt: row.created_at,
+    status: row.status,
+    sellerId: row.seller_id,
+    winnerId: row.winner_id,
+    finalPrice: row.final_price,
+    marketValue: row.market_value,
+    bidderCount: Number(row.bidder_count ?? 0)
+  }));
+}

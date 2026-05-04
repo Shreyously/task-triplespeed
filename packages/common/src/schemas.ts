@@ -34,7 +34,8 @@ export const placeBidSchema = z.object({
     (val) => !isNaN(Number(val)) && Number(val) > 0,
     "Bid amount must be a positive number"
   ),
-  idempotencyKey: z.string().min(8).optional()
+  idempotencyKey: z.string().min(8).optional(),
+  confirmHighBid: z.boolean().optional()
 });
 
 const tierEnum = z.enum(["Basic", "Pro", "Elite"]);
