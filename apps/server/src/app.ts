@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import { config } from "./config/env";
 import { authRoutes } from "./routes/auth/routes";
 import { packRoutes } from "./routes/packs/routes";
 import { listingRoutes } from "./routes/listings/routes";
@@ -10,7 +11,7 @@ import { errorHandler } from "./middleware/error";
 
 export function createApp() {
   const app = express();
-  app.set("trust proxy", false);
+  app.set("trust proxy", config.trustProxy);
   app.use(cors());
   app.use(express.json());
 
