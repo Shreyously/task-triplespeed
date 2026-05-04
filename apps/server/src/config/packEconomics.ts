@@ -7,10 +7,24 @@ export const PACK_ECONOMICS = {
 
   // Minimum win-rate: fraction of pack openings where value >= price paid
   // 25% = 1-in-4 packs is a "win" — intermittent reinforcement retention floor
+  // Note: Basic tier uses a lower floor (15%) due to structural feasibility constraints
   WIN_RATE_FLOOR: 0.25,
+
+  // Tier-specific targets (overrides defaults where specified)
+  TIER_TARGETS: {
+    "Basic": { targetMargin: 0.20, winRateFloor: 0.15 },  // Lower win-rate for Basic due to price/cards constraint
+    "Pro": { targetMargin: 0.20, winRateFloor: 0.25 },
+    "Elite": { targetMargin: 0.20, winRateFloor: 0.25 },
+  } as Record<string, { targetMargin: number; winRateFloor: number }>,
 
   // Monte Carlo runs for win-rate validation and simulation endpoint
   SIMULATION_RUNS: 10_000,
+
+  // Reduced Monte Carlo runs for win-rate bump loop (faster iteration during optimization)
+  BUMP_LOOP_SIMULATION_RUNS: 2_000,
+
+  // Maximum iterations for win-rate bump loop (prevents excessive computation)
+  MAX_BUMP_ITERATIONS: 15,
 
   // Maximum absolute weight change per rarity per rebalance cycle (±8%)
   // Prevents whiplash from sudden price spikes / crashes

@@ -4,7 +4,6 @@ import { botDetector } from "../services/botDetectionService";
 import { fairnessQueue } from "../services/fairnessQueueService";
 import { ACCOUNT_LIMITS, BOT_DETECTION, FAIRNESS_CONFIG } from "../config/antibot";
 import { pool } from "../db/pool";
-import { getIdempotentResponse } from "./idempotency";
 
 declare global {
   namespace Express {
@@ -31,10 +30,6 @@ export function rateLimitMiddleware(policy: RouteRateLimitPolicy) {
     try {
       const userId = req.user?.userId || 'anonymous';
       const ip = extractClientIP(req);
-
-      if (await shouldBypassRateLimitForReplay(req, policy, userId)) {
-        return next();
-      }
 
       const result = await checkRateLimits(userId, ip, policy, {
         botScore: req.botScore,
@@ -73,40 +68,6 @@ export function rateLimitMiddleware(policy: RouteRateLimitPolicy) {
       next();
     }
   };
-}
-
-async function shouldBypassRateLimitForReplay(
-  req: Request,
-  policy: RouteRateLimitPolicy,
-  userId: string
-): Promise<boolean> {
-  const idempotencyKey = (req as Request & { idempotencyKey?: string }).idempotencyKey;
-  if (!idempotencyKey || !req.user) {
-    return false;
-  }
-
-  if (policy.type !== 'PACK_PURCHASE') {
-    return false;
-  }
-
-  const dropId = req.body?.dropId;
-  if (!dropId) {
-    return false;
-  }
-
-  const cached = await getIdempotentResponse(`pack:${userId}`, idempotencyKey);
-  if (cached) {
-    return true;
-  }
-
-  const existingPurchase = await pool.query(
-    `SELECT 1
-     FROM pack_purchases
-     WHERE user_id = $1 AND drop_id = $2 AND idempotency_key = $3`,
-    [userId, dropId, idempotencyKey]
-  );
-
-  return Boolean(existingPurchase.rows[0]);
 }
 
 export async function botDetectionMiddleware(req: Request, res: Response, next: NextFunction) {

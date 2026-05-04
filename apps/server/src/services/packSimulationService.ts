@@ -9,6 +9,7 @@
 import { PoolClient } from "pg";
 import { pool } from "../db/pool";
 import { PACK_ECONOMICS, FeasibilityStatus } from "../config/packEconomics";
+import { getPoolMarketCards } from "./packMarketDataService";
 
 export interface SimulationResult {
   tier: string;
@@ -68,8 +69,8 @@ function stddev(values: number[], mean: number): number {
 /**
  * Run N pack opening simulations for a given tier with given weights.
  *
- * Uses the actual card values from the database (grouped by rarity) so that
- * results reflect current live prices, not just averages.
+ * Uses the full pack pool with pool-scoped market values so that
+ * results reflect the actual drop universe rather than only already-opened cards.
  *
  * @param client  - DB client (caller manages connection lifecycle)
  * @param tier    - Pack tier string for metadata
@@ -84,7 +85,9 @@ export async function simulateTier(
 ): Promise<SimulationResult> {
   // Get drop config
   const { rows: dropRows } = await client.query(
-    "SELECT DISTINCT ON (tier) price, cards_per_pack FROM drops WHERE tier = $1 ORDER BY tier, price ASC",
+    `SELECT price, cards_per_pack FROM drops
+     WHERE tier = $1 AND starts_at <= NOW() AND ends_at > NOW() AND inventory > 0
+     ORDER BY starts_at DESC LIMIT 1`,
     [tier]
   );
   if (!dropRows[0]) throw new Error(`No drop found for tier: ${tier}`);
@@ -102,15 +105,11 @@ export async function simulateTier(
     simWeights = configRows[0]?.rarity_weights ?? { Common: 1 };
   }
 
-  // Load card values by rarity from live DB (array of floats per rarity)
-  const { rows: cardRows } = await client.query(
-    "SELECT rarity, market_value::float AS value FROM cards ORDER BY rarity"
-  );
-
+  const poolCards = await getPoolMarketCards();
   const cardsByRarity: Record<string, number[]> = {};
-  for (const row of cardRows) {
-    if (!cardsByRarity[row.rarity]) cardsByRarity[row.rarity] = [];
-    cardsByRarity[row.rarity].push(parseFloat(row.value));
+  for (const card of poolCards) {
+    if (!cardsByRarity[card.rarity]) cardsByRarity[card.rarity] = [];
+    cardsByRarity[card.rarity].push(card.marketValue);
   }
 
   // Monte Carlo simulation
@@ -195,14 +194,12 @@ export async function simulateAllTiers(
   customWeightsByTier?: Record<string, Record<string, number>>,
   runs: number = PACK_ECONOMICS.SIMULATION_RUNS
 ): Promise<SimulationResult[]> {
-  const client = await pool.connect();
-  try {
-    return await Promise.all(
-      PACK_ECONOMICS.TIERS.map((tier) =>
+  return await Promise.all(
+    PACK_ECONOMICS.TIERS.map((tier) =>
+      pool.connect().then((client) =>
         simulateTier(client, tier, customWeightsByTier?.[tier] ?? null, runs)
+        .finally(() => client.release())
       )
-    );
-  } finally {
-    client.release();
-  }
+    )
+  );
 }

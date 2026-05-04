@@ -2,60 +2,34 @@
  * Pack Economics Service
  *
  * Implements the B1 rarity weight optimizer.
- *
- * ## Algorithm Summary
- *
- * 1. Fetch live market averages μᵣ per rarity from the cards table.
- * 2. Compute two endpoint weight vectors:
- *    - w_profit: max weight on cheapest rarities (maximizes margin)
- *    - w_excite: max weight on most expensive rarities (maximizes EV/variance)
- * 3. Binary search on α ∈ [0,1] to find α* where:
- *      EV(α) = N × Σᵣ w(α)[r] × μᵣ = P × (1 - M)
- *    (EV is monotonically increasing in α, so binary search is valid for this step.)
- *
- * ⚠️  MONOTONICITY CAVEAT:
- *    Binary search finds the α that satisfies the margin constraint analytically.
- *    However, the full constraint set (win-rate floor + weight bounds + delta cap)
- *    can break clean feasibility in the α-space. Win-rate is validated post-hoc
- *    via Monte Carlo simulation. If it fails, we adjust α upward in small steps
- *    (accepting margin concession up to MAX_MARGIN_CONCESSION). If still infeasible,
- *    we report INFEASIBLE and keep the current active config — never activate a
- *    failing candidate.
- *
- * 4. Validate candidate weights via 10K Monte Carlo simulation.
- * 5. Apply delta cap (±MAX_WEIGHT_DELTA) against current active weights.
- * 6. If all 5 acceptance rules pass → activate. Else → reject + log.
- *
- * ## Rebalance Trigger
- *    The drift check computes the CURRENT ACTIVE config's margin against LIVE
- *    prices. Only triggers rebalance when drift > DRIFT_THRESHOLD.
  */
 
-import Decimal from "decimal.js";
 import { PoolClient } from "pg";
 import { pool, withTx } from "../db/pool";
 import {
   PACK_ECONOMICS,
-  PackTier,
-  TriggerReason,
-  FeasibilityStatus,
+  type TriggerReason,
+  type FeasibilityStatus,
 } from "../config/packEconomics";
 import {
   getActiveConfig,
   getNextVersion,
   createConfigVersion,
   activateConfig,
-  PackConfigVersion,
 } from "../repositories/packConfigRepository";
-import { simulateTier, SimulationResult } from "./packSimulationService";
-
-// ─── Types ───────────────────────────────────────────────────────────────────
+import { simulateTier, type SimulationResult } from "./packSimulationService";
+import { getPoolMarketAverages } from "./packMarketDataService";
 
 export interface MarketAverage {
   rarity: string;
   avg: number;
   stddev: number;
   count: number;
+}
+
+interface WeightConstraint {
+  min: number;
+  max: number;
 }
 
 export interface OptimizationResult {
@@ -91,84 +65,116 @@ export interface RebalanceResult {
   triggerReason: TriggerReason;
 }
 
-// ─── Market Data ─────────────────────────────────────────────────────────────
-
-/** Fetch average and stddev market value per rarity from live card prices. */
-export async function getMarketAverages(
-  client: PoolClient
-): Promise<MarketAverage[]> {
-  const { rows } = await client.query(`
-    SELECT
-      rarity,
-      COALESCE(AVG(market_value), 0)::float    AS avg,
-      COALESCE(STDDEV(market_value), 0)::float AS stddev,
-      COUNT(*)::int                             AS count
-    FROM cards
-    GROUP BY rarity
-    ORDER BY avg ASC
-  `);
-  return rows.map((r) => ({
-    rarity: r.rarity,
-    avg: parseFloat(r.avg),
-    stddev: parseFloat(r.stddev),
-    count: parseInt(r.count, 10),
-  }));
+export async function getMarketAverages(client: PoolClient): Promise<MarketAverage[]> {
+  return getPoolMarketAverages();
 }
 
-// ─── Weight Construction ──────────────────────────────────────────────────────
-
-/**
- * Build the "profit-max" weight vector:
- * Greedily give w_max to the cheapest rarities first. The cheapest rarity
- * absorbs whatever budget remains after others take their max.
- */
-function computeProfitMaxWeights(
-  available: MarketAverage[]
-): Record<string, number> {
-  // Sort cheapest first
-  const sorted = [...available].sort((a, b) => a.avg - b.avg);
-  return allocateGreedy(sorted);
+function buildConstraints(rarities: string[]): Record<string, WeightConstraint> {
+  return rarities.reduce<Record<string, WeightConstraint>>((acc, rarity) => {
+    acc[rarity] = PACK_ECONOMICS.WEIGHT_BOUNDS[rarity] ?? { min: 0.01, max: 0.5 };
+    return acc;
+  }, {});
 }
 
-/**
- * Build the "excitement-max" weight vector:
- * Greedily give w_max to the most expensive rarities first.
- */
-function computeExcitementMaxWeights(
-  available: MarketAverage[]
-): Record<string, number> {
-  // Sort most expensive first
-  const sorted = [...available].sort((a, b) => b.avg - a.avg);
-  return allocateGreedy(sorted);
-}
-
-/**
- * Greedy allocation: give w_max to each rarity in order.
- * First rarity gets whatever budget remains (clamped to its bounds).
- */
-function allocateGreedy(sorted: MarketAverage[]): Record<string, number> {
+function finalizeWeights(weights: Record<string, number>): Record<string, number> {
   const result: Record<string, number> = {};
-  let remaining = 1.0;
+  for (const [rarity, value] of Object.entries(weights)) {
+    result[rarity] = Number(value.toFixed(8));
+  }
+  return result;
+}
 
-  for (let i = 0; i < sorted.length; i++) {
-    const { rarity } = sorted[i];
-    const bounds = PACK_ECONOMICS.WEIGHT_BOUNDS[rarity] ?? { min: 0.01, max: 0.5 };
+export function projectWeightsToConstraints(
+  target: Record<string, number>,
+  constraints: Record<string, WeightConstraint>
+): Record<string, number> {
+  const keys = Object.keys(constraints);
+  const result: Record<string, number> = {};
 
-    if (i === 0) {
-      // First rarity absorbs remaining budget
-      result[rarity] = Math.min(Math.max(remaining, bounds.min), bounds.max);
-    } else {
-      const give = Math.min(bounds.max, remaining);
-      result[rarity] = Math.max(give, bounds.min);
-    }
-    remaining -= result[rarity];
+  for (const key of keys) {
+    const constraint = constraints[key];
+    const raw = target[key] ?? constraint.min;
+    result[key] = Math.min(constraint.max, Math.max(constraint.min, raw));
   }
 
-  // Renormalize to exactly 1.0 (floating point safety)
-  return normalize(result);
+  let delta = 1 - Object.values(result).reduce((sum, value) => sum + value, 0);
+  if (delta > 0) {
+    for (const key of keys) {
+      const slack = constraints[key].max - result[key];
+      if (slack <= 0) continue;
+      const add = Math.min(slack, delta);
+      result[key] += add;
+      delta -= add;
+      if (delta <= 1e-9) break;
+    }
+  } else if (delta < 0) {
+    let excess = Math.abs(delta);
+    for (const key of [...keys].reverse()) {
+      const removable = result[key] - constraints[key].min;
+      if (removable <= 0) continue;
+      const take = Math.min(removable, excess);
+      result[key] -= take;
+      excess -= take;
+      if (excess <= 1e-9) break;
+    }
+    delta = -excess;
+  }
+
+  // Validate that redistribution hasn't violated individual bounds
+  for (const key of keys) {
+    if (result[key] < constraints[key].min - 1e-9 || result[key] > constraints[key].max + 1e-9) {
+      throw new Error(`Weight for ${key} (${result[key]}) violates bounds [${constraints[key].min}, ${constraints[key].max}]`);
+    }
+  }
+
+  const total = Object.values(result).reduce((sum, value) => sum + value, 0);
+  if (Math.abs(total - 1) > 1e-6) {
+    throw new Error("Unable to project weights into a feasible bounded simplex");
+  }
+
+  return finalizeWeights(result);
 }
 
-/** Linear interpolation: w(α) = (1 - α) × w_profit + α × w_excite */
+export function allocateGreedy(sorted: MarketAverage[]): Record<string, number> {
+  const constraints = buildConstraints(sorted.map(({ rarity }) => rarity));
+  const result: Record<string, number> = {};
+  let minSum = 0;
+  let maxSum = 0;
+
+  for (const rarity of Object.keys(constraints)) {
+    result[rarity] = constraints[rarity].min;
+    minSum += constraints[rarity].min;
+    maxSum += constraints[rarity].max;
+  }
+
+  if (minSum > 1.000001 || maxSum < 0.999999) {
+    throw new Error("Weight bounds are infeasible for the available rarity set");
+  }
+
+  let remaining = 1 - minSum;
+  for (const { rarity } of sorted) {
+    const capacity = constraints[rarity].max - result[rarity];
+    const add = Math.min(capacity, remaining);
+    result[rarity] += add;
+    remaining -= add;
+    if (remaining <= 1e-9) break;
+  }
+
+  if (remaining > 1e-6) {
+    throw new Error("Unable to allocate endpoint weights within configured bounds");
+  }
+
+  return finalizeWeights(result);
+}
+
+export function computeProfitMaxWeights(available: MarketAverage[]): Record<string, number> {
+  return allocateGreedy([...available].sort((a, b) => a.avg - b.avg));
+}
+
+export function computeExcitementMaxWeights(available: MarketAverage[]): Record<string, number> {
+  return allocateGreedy([...available].sort((a, b) => b.avg - a.avg));
+}
+
 function interpolateWeights(
   wProfit: Record<string, number>,
   wExcite: Record<string, number>,
@@ -176,43 +182,24 @@ function interpolateWeights(
 ): Record<string, number> {
   const result: Record<string, number> = {};
   for (const rarity of Object.keys(wProfit)) {
-    result[rarity] = (1 - alpha) * (wProfit[rarity] ?? 0) + alpha * (wExcite[rarity] ?? 0);
+    result[rarity] = ((1 - alpha) * (wProfit[rarity] ?? 0)) + (alpha * (wExcite[rarity] ?? 0));
   }
-  return normalize(result);
+  return projectWeightsToConstraints(result, buildConstraints(Object.keys(result)));
 }
-
-function normalize(w: Record<string, number>): Record<string, number> {
-  const total = Object.values(w).reduce((s, v) => s + v, 0);
-  if (total === 0) return w;
-  const result: Record<string, number> = {};
-  for (const [k, v] of Object.entries(w)) {
-    result[k] = v / total;
-  }
-  return result;
-}
-
-// ─── EV Computation ───────────────────────────────────────────────────────────
 
 function computeAnalyticalEV(
   weights: Record<string, number>,
   averages: MarketAverage[],
   cardsPerPack: number
 ): number {
-  const avgMap = new Map(averages.map((a) => [a.rarity, a.avg]));
+  const avgMap = new Map(averages.map((average) => [average.rarity, average.avg]));
   const evPerCard = Object.entries(weights).reduce(
-    (sum, [rarity, w]) => sum + w * (avgMap.get(rarity) ?? 0),
+    (sum, [rarity, weight]) => sum + (weight * (avgMap.get(rarity) ?? 0)),
     0
   );
   return evPerCard * cardsPerPack;
 }
 
-// ─── Binary Search for α* ─────────────────────────────────────────────────────
-
-/**
- * Binary search on α to find the interpolation that produces margin = M analytically.
- * NOTE: This solves only the EV/margin target. Win-rate and delta-cap are
- * validated separately via Monte Carlo (see above caveat).
- */
 function findOptimalAlpha(
   price: number,
   cardsPerPack: number,
@@ -222,96 +209,102 @@ function findOptimalAlpha(
   wExcite: Record<string, number>
 ): { alpha: number; weights: Record<string, number>; ev: number } {
   const targetEV = price * (1 - targetMargin);
-
   let lo = 0;
   let hi = 1;
 
-  for (let i = 0; i < PACK_ECONOMICS.BINARY_SEARCH_ITERATIONS; i++) {
+  for (let index = 0; index < PACK_ECONOMICS.BINARY_SEARCH_ITERATIONS; index += 1) {
     const mid = (lo + hi) / 2;
-    const w = interpolateWeights(wProfit, wExcite, mid);
-    const ev = computeAnalyticalEV(w, averages, cardsPerPack);
+    const weights = interpolateWeights(wProfit, wExcite, mid);
+    const ev = computeAnalyticalEV(weights, averages, cardsPerPack);
 
     if (ev < targetEV) {
-      lo = mid; // can afford more excitement (higher EV)
+      lo = mid;
     } else {
-      hi = mid; // pull back (EV is overshooting)
+      hi = mid;
     }
   }
 
-  const finalAlpha = lo;
-  const finalWeights = interpolateWeights(wProfit, wExcite, finalAlpha);
-  const finalEV = computeAnalyticalEV(finalWeights, averages, cardsPerPack);
-
-  return { alpha: finalAlpha, weights: finalWeights, ev: finalEV };
+  const alpha = lo;
+  const weights = interpolateWeights(wProfit, wExcite, alpha);
+  return {
+    alpha,
+    weights,
+    ev: computeAnalyticalEV(weights, averages, cardsPerPack),
+  };
 }
 
-// ─── Delta Cap ────────────────────────────────────────────────────────────────
+function buildDeltaConstraints(
+  candidate: Record<string, number>,
+  current: Record<string, number>
+): Record<string, WeightConstraint> {
+  return Object.keys(candidate).reduce<Record<string, WeightConstraint>>((acc, rarity) => {
+    const currentWeight = current[rarity] ?? 0;
+    const bounds = PACK_ECONOMICS.WEIGHT_BOUNDS[rarity] ?? { min: 0.01, max: 0.5 };
+    const min = Math.max(bounds.min, currentWeight - PACK_ECONOMICS.MAX_WEIGHT_DELTA);
+    const max = Math.min(bounds.max, currentWeight + PACK_ECONOMICS.MAX_WEIGHT_DELTA);
 
-/**
- * Apply the ±MAX_WEIGHT_DELTA cap against current active weights.
- * Returns capped weights (renormalized) and whether capping was needed.
- */
-function applyDeltaCap(
+    // Ensure feasible interval (for new rarities where currentWeight = 0)
+    if (min > max) {
+      acc[rarity] = bounds;
+    } else {
+      acc[rarity] = { min, max };
+    }
+    return acc;
+  }, {});
+}
+
+export function applyDeltaCap(
   candidate: Record<string, number>,
   current: Record<string, number>
 ): { weights: Record<string, number>; capped: boolean } {
-  let capped = false;
-  const result: Record<string, number> = {};
-
-  for (const rarity of Object.keys(candidate)) {
-    const currentW = current[rarity] ?? 0;
-    const delta = candidate[rarity] - currentW;
-    if (Math.abs(delta) > PACK_ECONOMICS.MAX_WEIGHT_DELTA) {
-      capped = true;
-      result[rarity] =
-        currentW + Math.sign(delta) * PACK_ECONOMICS.MAX_WEIGHT_DELTA;
-    } else {
-      result[rarity] = candidate[rarity];
-    }
-  }
-
-  return { weights: normalize(result), capped };
+  const constraints = buildDeltaConstraints(candidate, current);
+  const projected = projectWeightsToConstraints(candidate, constraints);
+  const capped = Object.keys(candidate).some((rarity) => Math.abs((candidate[rarity] ?? 0) - (projected[rarity] ?? 0)) > 1e-6);
+  return { weights: projected, capped };
 }
 
-// ─── Acceptance Rule Validation ───────────────────────────────────────────────
-
-/**
- * The 5 acceptance rules (hard contract — ALL must pass to activate).
- * Returns array of rejection reasons (empty = all pass).
- */
 function validateAcceptanceRules(
   weights: Record<string, number>,
   sim: SimulationResult,
-  targetMargin: number
+  targetMargin: number,
+  currentWeights: Record<string, number> = {},
+  winRateFloor: number = PACK_ECONOMICS.WIN_RATE_FLOOR
 ): string[] {
   const reasons: string[] = [];
 
-  // Rule 1: Margin
   if (sim.platformMargin < targetMargin) {
     reasons.push(
       `Simulated margin ${(sim.platformMargin * 100).toFixed(2)}% < target ${(targetMargin * 100).toFixed(2)}%`
     );
   }
 
-  // Rule 2: Win rate
-  if (sim.winRate < PACK_ECONOMICS.WIN_RATE_FLOOR) {
+  if (sim.winRate < winRateFloor) {
     reasons.push(
-      `Simulated win rate ${(sim.winRate * 100).toFixed(2)}% < floor ${(PACK_ECONOMICS.WIN_RATE_FLOOR * 100).toFixed(2)}%`
+      `Simulated win rate ${(sim.winRate * 100).toFixed(2)}% < floor ${(winRateFloor * 100).toFixed(2)}%`
     );
   }
 
-  // Rule 3: Weight bounds
-  for (const [rarity, w] of Object.entries(weights)) {
+  for (const [rarity, weight] of Object.entries(weights)) {
     const bounds = PACK_ECONOMICS.WEIGHT_BOUNDS[rarity];
     if (!bounds) continue;
-    if (w < bounds.min) reasons.push(`Weight for ${rarity} (${w.toFixed(4)}) below min ${bounds.min}`);
-    if (w > bounds.max) reasons.push(`Weight for ${rarity} (${w.toFixed(4)}) above max ${bounds.max}`);
+    if (weight < bounds.min) reasons.push(`Weight for ${rarity} (${weight.toFixed(4)}) below min ${bounds.min}`);
+    if (weight > bounds.max) reasons.push(`Weight for ${rarity} (${weight.toFixed(4)}) above max ${bounds.max}`);
   }
 
-  // Rule 4: Delta cap (already applied before calling validate — logged separately if capped)
+  const deltaRarities = new Set([...Object.keys(currentWeights), ...Object.keys(weights)]);
+  // Only check deltas for rarities present in both configs to avoid false positives
+  const commonRarities = Object.keys(currentWeights).filter((rarity) => rarity in weights);
+  for (const rarity of commonRarities) {
+    const currentWeight = currentWeights[rarity];
+    const nextWeight = weights[rarity];
+    if (Math.abs(nextWeight - currentWeight) > PACK_ECONOMICS.MAX_WEIGHT_DELTA + 1e-6) {
+      reasons.push(
+        `Weight delta for ${rarity} (${Math.abs(nextWeight - currentWeight).toFixed(4)}) exceeds cap ${PACK_ECONOMICS.MAX_WEIGHT_DELTA}`
+      );
+    }
+  }
 
-  // Rule 5: Weights sum to 1
-  const total = Object.values(weights).reduce((s, v) => s + v, 0);
+  const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
   if (Math.abs(total - 1.0) > 0.001) {
     reasons.push(`Weights sum to ${total.toFixed(6)}, not 1.0`);
   }
@@ -319,60 +312,48 @@ function validateAcceptanceRules(
   return reasons;
 }
 
-// ─── Core Optimizer ───────────────────────────────────────────────────────────
-
-/**
- * Full optimization pipeline for a single tier:
- * 1. Fetch drop config for the tier
- * 2. Get market averages
- * 3. Binary search for α*
- * 4. Apply delta cap if current active config exists
- * 5. Monte Carlo validation
- * 6. Win-rate adjustment if needed
- * 7. Return OptimizationResult (does NOT persist to DB)
- */
 export async function optimizeForTier(
   client: PoolClient,
   tier: string
 ): Promise<OptimizationResult> {
-  // Get drop config (price, cardsPerPack)
   const { rows: dropRows } = await client.query(
-    "SELECT DISTINCT ON (tier) price, cards_per_pack FROM drops WHERE tier = $1 ORDER BY tier, price ASC",
+    `SELECT price, cards_per_pack FROM drops
+     WHERE tier = $1 AND starts_at <= NOW() AND ends_at > NOW() AND inventory > 0
+     ORDER BY starts_at DESC LIMIT 1`,
     [tier]
   );
   if (!dropRows[0]) throw new Error(`No drop found for tier: ${tier}`);
 
+  // Get tier-specific targets (fallback to global defaults)
+  const tierTargets = PACK_ECONOMICS.TIER_TARGETS[tier] || {
+    targetMargin: PACK_ECONOMICS.TARGET_MARGIN,
+    winRateFloor: PACK_ECONOMICS.WIN_RATE_FLOOR,
+  };
+
   const price = parseFloat(dropRows[0].price);
   const cardsPerPack = parseInt(dropRows[0].cards_per_pack, 10);
-
-  // Market averages (only rarities with cards)
   const allAverages = await getMarketAverages(client);
-  const available = allAverages.filter((a) => a.count > 0);
+  const available = allAverages.filter((average) => average.count > 0);
 
   if (available.length < 2) {
-    const emptySim = makeEmptySimResult(tier, price);
     return {
       tier,
       weights: {},
       analyticalEV: 0,
       analyticalMargin: 0,
       feasibility: "INFEASIBLE",
-      simulation: emptySim,
+      simulation: makeEmptySimResult(tier, price),
       appliedDeltaCap: false,
-      rejectionReasons: ["Insufficient rarities in card pool (need ≥2)"],
+      rejectionReasons: ["Insufficient rarities in card pool (need >=2)"],
     };
   }
 
-  // Current active config (for delta cap)
   const activeConfig = await getActiveConfig(client, tier);
   const currentWeights: Record<string, number> = activeConfig?.rarity_weights ?? {};
-
-  // Endpoint weight vectors
   const wProfit = computeProfitMaxWeights(available);
   const wExcite = computeExcitementMaxWeights(available);
 
-  // Binary search for margin-satisfying α
-  let { weights: candidateWeights, ev: analyticalEV } = findOptimalAlpha(
+  const baseline = findOptimalAlpha(
     price,
     cardsPerPack,
     PACK_ECONOMICS.TARGET_MARGIN,
@@ -381,55 +362,68 @@ export async function optimizeForTier(
     wExcite
   );
 
-  // Apply delta cap if we have a current active config
+  let candidateWeights = baseline.weights;
+  let analyticalEV = baseline.ev;
   let appliedDeltaCap = false;
+
   if (Object.keys(currentWeights).length > 0) {
-    const { weights: capped, capped: wasCapped } = applyDeltaCap(candidateWeights, currentWeights);
-    if (wasCapped) {
-      candidateWeights = capped;
-      analyticalEV = computeAnalyticalEV(candidateWeights, available, cardsPerPack);
-      appliedDeltaCap = true;
-    }
+    const capped = applyDeltaCap(candidateWeights, currentWeights);
+    candidateWeights = capped.weights;
+    analyticalEV = computeAnalyticalEV(candidateWeights, available, cardsPerPack);
+    appliedDeltaCap = capped.capped;
   }
 
-  // Monte Carlo win-rate validation
   let sim = await simulateTier(client, tier, candidateWeights, PACK_ECONOMICS.SIMULATION_RUNS);
 
-  // Win-rate adjustment: nudge α upward if below floor
-  // (accepts margin concession up to MAX_MARGIN_CONCESSION)
-  if (sim.winRate < PACK_ECONOMICS.WIN_RATE_FLOOR) {
-    const maxAlpha = 1.0;
-    let alpha = findOptimalAlpha(price, cardsPerPack, PACK_ECONOMICS.TARGET_MARGIN, available, wProfit, wExcite).alpha;
+  if (sim.winRate < tierTargets.winRateFloor) {
+    let bumpIteration = 0;
+    for (
+      let alpha = baseline.alpha + PACK_ECONOMICS.WIN_RATE_ALPHA_BUMP;
+      alpha <= 1.000001 && bumpIteration < PACK_ECONOMICS.MAX_BUMP_ITERATIONS;
+      alpha += PACK_ECONOMICS.WIN_RATE_ALPHA_BUMP
+    ) {
+      bumpIteration++;
+      let adjustedWeights = interpolateWeights(wProfit, wExcite, alpha);
+      if (Object.keys(currentWeights).length > 0) {
+        const capped = applyDeltaCap(adjustedWeights, currentWeights);
+        adjustedWeights = capped.weights;
+        appliedDeltaCap = appliedDeltaCap || capped.capped;
+      }
 
-    for (let bump = PACK_ECONOMICS.WIN_RATE_ALPHA_BUMP; alpha + bump <= maxAlpha; bump += PACK_ECONOMICS.WIN_RATE_ALPHA_BUMP) {
-      const adjustedWeights = interpolateWeights(wProfit, wExcite, alpha + bump);
       const adjustedEV = computeAnalyticalEV(adjustedWeights, available, cardsPerPack);
       const adjustedMargin = (price - adjustedEV) / price;
+      if (adjustedMargin < PACK_ECONOMICS.TARGET_MARGIN - PACK_ECONOMICS.MAX_MARGIN_CONCESSION) {
+        break;
+      }
 
-      // Accept concession up to MAX_MARGIN_CONCESSION below target
-      if (adjustedMargin < PACK_ECONOMICS.TARGET_MARGIN - PACK_ECONOMICS.MAX_MARGIN_CONCESSION) break;
-
-      const adjustedSim = await simulateTier(client, tier, adjustedWeights, PACK_ECONOMICS.SIMULATION_RUNS);
-      if (adjustedSim.winRate >= PACK_ECONOMICS.WIN_RATE_FLOOR) {
+      // Use reduced iterations during bump loop for performance
+      const adjustedSim = await simulateTier(client, tier, adjustedWeights, PACK_ECONOMICS.BUMP_LOOP_SIMULATION_RUNS);
+      if (adjustedSim.winRate >= tierTargets.winRateFloor) {
         candidateWeights = adjustedWeights;
         analyticalEV = adjustedEV;
-        sim = adjustedSim;
+        // Run final validation with full simulation runs
+        sim = await simulateTier(client, tier, adjustedWeights, PACK_ECONOMICS.SIMULATION_RUNS);
         break;
       }
     }
   }
 
   const analyticalMargin = (price - analyticalEV) / price;
-  const rejectionReasons = validateAcceptanceRules(candidateWeights, sim, PACK_ECONOMICS.TARGET_MARGIN);
 
-  let feasibility: FeasibilityStatus;
-  if (rejectionReasons.length > 0) {
-    feasibility = "INFEASIBLE";
-  } else if (sim.winRate < PACK_ECONOMICS.WIN_RATE_FLOOR + PACK_ECONOMICS.MARGINAL_WIN_RATE_BUFFER) {
-    feasibility = "MARGINAL";
-  } else {
-    feasibility = "FEASIBLE";
-  }
+  const rejectionReasons = validateAcceptanceRules(
+    candidateWeights,
+    sim,
+    tierTargets.targetMargin,
+    currentWeights,
+    tierTargets.winRateFloor
+  );
+
+  const feasibility: FeasibilityStatus =
+    rejectionReasons.length > 0
+      ? "INFEASIBLE"
+      : sim.winRate < tierTargets.winRateFloor + PACK_ECONOMICS.MARGINAL_WIN_RATE_BUFFER
+        ? "MARGINAL"
+        : "FEASIBLE";
 
   return {
     tier,
@@ -443,13 +437,6 @@ export async function optimizeForTier(
   };
 }
 
-// ─── Drift Check ──────────────────────────────────────────────────────────────
-
-/**
- * Check if the CURRENT ACTIVE config's margin has drifted from the target
- * when re-evaluated against LIVE market prices.
- * This is the rebalance trigger — not the post-optimization margin.
- */
 export async function checkDrift(
   client: PoolClient,
   tier: string
@@ -462,13 +449,14 @@ export async function checkDrift(
       activeMargin: 0,
       targetMargin: PACK_ECONOMICS.TARGET_MARGIN,
       drift: 1,
-      needsRebalance: true, // No config → needs bootstrap
+      needsRebalance: true,
     };
   }
 
-  // Get drop config
   const { rows: dropRows } = await client.query(
-    "SELECT DISTINCT ON (tier) price, cards_per_pack FROM drops WHERE tier = $1 ORDER BY tier, price ASC",
+    `SELECT price, cards_per_pack FROM drops
+     WHERE tier = $1 AND starts_at <= NOW() AND ends_at > NOW() AND inventory > 0
+     ORDER BY starts_at DESC LIMIT 1`,
     [tier]
   );
   if (!dropRows[0]) {
@@ -486,8 +474,6 @@ export async function checkDrift(
   const cardsPerPack = parseInt(dropRows[0].cards_per_pack, 10);
   const averages = await getMarketAverages(client);
   const targetMargin = parseFloat(String(activeConfig.target_margin ?? PACK_ECONOMICS.TARGET_MARGIN));
-
-  // EV using the ACTIVE config's weights against CURRENT prices
   const currentEV = computeAnalyticalEV(activeConfig.rarity_weights, averages, cardsPerPack);
   const currentMargin = (price - currentEV) / price;
   const drift = Math.abs(currentMargin - targetMargin);
@@ -502,12 +488,6 @@ export async function checkDrift(
   };
 }
 
-// ─── Rebalance Orchestrator ───────────────────────────────────────────────────
-
-/**
- * Run the full optimize → validate → (conditionally) activate pipeline for one tier.
- * Hard contract: NEVER activates a config that fails any acceptance rule.
- */
 export async function rebalanceTier(
   tier: string,
   triggerReason: TriggerReason,
@@ -517,11 +497,10 @@ export async function rebalanceTier(
   try {
     const activeConfig = await getActiveConfig(client, tier);
     const previousWeights = activeConfig?.rarity_weights ?? {};
+    const optimization = await optimizeForTier(client, tier);
 
-    const opt = await optimizeForTier(client, tier);
-
-    if (opt.feasibility === "INFEASIBLE") {
-      console.warn(`[PackEconomics] Rebalance REJECTED for ${tier}:`, opt.rejectionReasons);
+    if (optimization.feasibility === "INFEASIBLE") {
+      console.warn(`[PackEconomics] Rebalance REJECTED for ${tier}:`, optimization.rejectionReasons);
       return {
         tier,
         previousWeights,
@@ -529,51 +508,49 @@ export async function rebalanceTier(
         weightDeltas: null,
         configVersionId: null,
         version: null,
-        simulation: opt.simulation,
+        simulation: optimization.simulation,
         status: "REJECTED",
-        rejectionReasons: opt.rejectionReasons,
+        rejectionReasons: optimization.rejectionReasons,
         triggerReason,
       };
     }
 
-    const weightDeltas: Record<string, number> = {};
-    for (const rarity of Object.keys(opt.weights)) {
-      weightDeltas[rarity] = (opt.weights[rarity] ?? 0) - (previousWeights[rarity] ?? 0);
-    }
+    const weightDeltas = Object.keys(optimization.weights).reduce<Record<string, number>>((acc, rarity) => {
+      acc[rarity] = (optimization.weights[rarity] ?? 0) - (previousWeights[rarity] ?? 0);
+      return acc;
+    }, {});
 
     if (dryRun) {
       return {
         tier,
         previousWeights,
-        newWeights: opt.weights,
+        newWeights: optimization.weights,
         weightDeltas,
         configVersionId: null,
         version: null,
-        simulation: opt.simulation,
+        simulation: optimization.simulation,
         status: "SKIPPED",
         rejectionReasons: [],
         triggerReason,
       };
     }
 
-    // Build market snapshot for storage
     const allAverages = await getMarketAverages(client);
-    const marketSnapshot: Record<string, { avg: number; count: number }> = {};
-    for (const a of allAverages) {
-      marketSnapshot[a.rarity] = { avg: a.avg, count: a.count };
-    }
+    const marketSnapshot = allAverages.reduce<Record<string, { avg: number; count: number }>>((acc, average) => {
+      acc[average.rarity] = { avg: average.avg, count: average.count };
+      return acc;
+    }, {});
 
-    // Persist and activate atomically
-    return await withTx(async (txClient) => {
+    return withTx(async (txClient) => {
       const nextVersion = await getNextVersion(txClient, tier);
       const newConfig = await createConfigVersion(txClient, {
         tier,
         version: nextVersion,
-        rarityWeights: opt.weights,
+        rarityWeights: optimization.weights,
         targetMargin: PACK_ECONOMICS.TARGET_MARGIN,
-        actualEv: opt.analyticalEV,
-        simulatedMargin: opt.simulation.platformMargin,
-        simulatedWinRate: opt.simulation.winRate,
+        actualEv: optimization.analyticalEV,
+        simulatedMargin: optimization.simulation.platformMargin,
+        simulatedWinRate: optimization.simulation.winRate,
         marketSnapshot,
         triggerReason,
       });
@@ -584,11 +561,11 @@ export async function rebalanceTier(
       return {
         tier,
         previousWeights,
-        newWeights: opt.weights,
+        newWeights: optimization.weights,
         weightDeltas,
         configVersionId: newConfig.id,
         version: nextVersion,
-        simulation: opt.simulation,
+        simulation: optimization.simulation,
         status: "ACTIVATED" as const,
         rejectionReasons: [],
         triggerReason,
@@ -599,7 +576,6 @@ export async function rebalanceTier(
   }
 }
 
-/** Run drift check + conditional rebalance for all tiers. Called by the background worker. */
 export async function rebalanceIfNeeded(
   triggerReason: TriggerReason = "scheduled"
 ): Promise<RebalanceResult[]> {
@@ -610,22 +586,19 @@ export async function rebalanceIfNeeded(
     try {
       const drift = await checkDrift(client, tier);
       if (!drift.needsRebalance) {
-        console.log(`[PackEconomics] ${tier} within tolerance (drift=${(drift.drift * 100).toFixed(2)}%) — skipping`);
+        console.log(`[PackEconomics] ${tier} within tolerance (drift=${(drift.drift * 100).toFixed(2)}%) - skipping`);
         continue;
       }
-      console.log(`[PackEconomics] ${tier} drift=${(drift.drift * 100).toFixed(2)}% — rebalancing`);
+      console.log(`[PackEconomics] ${tier} drift=${(drift.drift * 100).toFixed(2)}% - rebalancing`);
     } finally {
       client.release();
     }
 
-    const result = await rebalanceTier(tier, triggerReason);
-    results.push(result);
+    results.push(await rebalanceTier(tier, triggerReason));
   }
 
   return results;
 }
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function makeEmptySimResult(tier: string, price: number): SimulationResult {
   return {

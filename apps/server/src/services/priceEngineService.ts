@@ -3,7 +3,7 @@ import { pool, withTx } from "../db/pool";
 import { getAllCards, updateCardMarketValues } from "../repositories/cardRepository";
 import { emitPortfolioUpdate, emitPriceUpdate } from "../realtime/socket";
 
-const RARITY_BASE_RANGES: Record<string, [number, number]> = {
+export const RARITY_BASE_RANGES: Record<string, [number, number]> = {
   Common: [0.05, 0.5],
   Uncommon: [0.25, 2],
   Rare: [1, 10],

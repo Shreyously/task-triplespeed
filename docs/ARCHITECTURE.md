@@ -47,6 +47,9 @@ Plain English:
 
 ### Rarity weights by tier
 
+**Note:** The weights below are bootstrap defaults (Part A). The pack economics optimizer (B1) may override these values at runtime to maintain target margins and win-rates. See the "Pack Economics" section for details on how the optimizer adjusts weights dynamically.
+
+Bootstrap defaults (Part A):
 - **Basic (3 cards):** `Common 0.72`, `Uncommon 0.22`, `Rare 0.05`, `Holo Rare 0.01`
 - **Pro (5 cards):** `Common 0.55`, `Uncommon 0.25`, `Rare 0.12`, `Holo Rare 0.06`, `Ultra Rare/EX/GX 0.02`
 - **Elite (7 cards):** `Common 0.32`, `Uncommon 0.24`, `Rare 0.20`, `Holo Rare 0.14`, `Ultra Rare/EX/GX 0.08`, `Secret Rare 0.02`
@@ -204,7 +207,7 @@ Approximate EV per pack from current weights:
 
 2. **Monte Carlo Validation Engine**
    - Runs 10,000 simulations per optimization cycle
-   - Uses actual database card values grouped by rarity (not just averages)
+   - Uses the full Redis-backed pack pool as the simulation universe, with per-card market values derived from observed card-specific prices when available and stable rarity-based fallback prices otherwise
    - Computes comprehensive statistics:
      - Mean/median/stddev pack values
      - Percentile distribution (p5, p10, p25, p50, p75, p90, p95)
