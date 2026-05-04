@@ -4,9 +4,9 @@ export const FEES = {
 } as const;
 
 export const STARTING_BALANCE = "1000.00";
-export const ANTI_SNIPE_SECONDS = 10;
+export const ANTI_SNIPE_SECONDS = 30;
 export const ANTI_SNIPE_MAX_EXTENSIONS = 6;
-export const SEALED_BID_WINDOW_SECONDS = 15;
+export const SEALED_BID_WINDOW_SECONDS = 30;
 export const OPEN_BID_COOLDOWN_MS = 1500;
 export const OPEN_BID_WINDOW_MS = 10_000;
 export const OPEN_BID_WINDOW_MAX = 5;
