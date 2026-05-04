@@ -10,17 +10,17 @@ import { rateLimitMiddleware, botDetectionMiddleware, packPurchaseMiddleware } f
 
 export const packRoutes = Router();
 
-packRoutes.get("/drops", rateLimitMiddleware('API'), asyncHandler(listDropsController));
+packRoutes.get("/drops", rateLimitMiddleware({ type: 'API', access: 'readOnly' }), asyncHandler(listDropsController));
 packRoutes.post("/packs/buy",
   authMiddleware,
   requireIdempotency,
   validateBody(buyPackSchema),
-  rateLimitMiddleware('PACK_PURCHASE'),
   botDetectionMiddleware,
+  rateLimitMiddleware({ type: 'PACK_PURCHASE', access: 'writeProtected' }),
   packPurchaseMiddleware,
   asyncHandler(buyPackController)
 );
-packRoutes.get("/packs/:purchaseId/reveal", authMiddleware, rateLimitMiddleware('API'), asyncHandler(revealPackController));
-packRoutes.get("/packs/fairness/:dropId/check", authMiddleware, rateLimitMiddleware('API'), asyncHandler(checkFairnessQueueController));
+packRoutes.get("/packs/:purchaseId/reveal", authMiddleware, rateLimitMiddleware({ type: 'API', access: 'readOnly' }), asyncHandler(revealPackController));
+packRoutes.get("/packs/fairness/:dropId/check", authMiddleware, rateLimitMiddleware({ type: 'API', access: 'readOnly' }), asyncHandler(checkFairnessQueueController));
 packRoutes.post("/admin/drops/:dropId/process-fairness", authMiddleware, adminMiddleware, asyncHandler(processFairnessQueueController));
 packRoutes.patch("/admin/drops/:dropId", authMiddleware, adminMiddleware, asyncHandler(adminUpdateDropController));

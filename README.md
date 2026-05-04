@@ -140,11 +140,17 @@ Detailed version: `docs/architecture.md`.
 
 Short summary:
 - PostgreSQL is the financial source of truth.
-- Redis is used for idempotency/cache, not as primary state.
+- Redis is used for idempotency/cache plus atomic B2 transient enforcement state.
 - Concurrency safety is enforced with DB transactions + row locks (`FOR UPDATE`).
 - Money movement and ownership transfer are committed atomically.
 - Socket.io provides real-time UX signals (drops, bids, listings, portfolio, prices).
 - Workers handle settlement, drop sync, price ticks, and portfolio snapshots.
+
+## Part B2 Hardening
+- Rate limiting is now Redis-first and atomic per request via one Lua script that evaluates every bucket for a route class together before consuming any window.
+- Read-only API routes use hybrid degraded-open behavior during Redis outages; purchase/auth/marketplace write paths fail closed with `503`.
+- Contested low-inventory drops can open an automatic short fairness window so fastest-client-wins no longer deterministically decides the result.
+- Bot handling is soft-first: medium-risk traffic gets tighter purchase throttles and fairness routing, while high-confidence automation is blocked.
 
 ## Correctness Under Concurrency (How it is enforced)
 - Pack buys: lock drop row, validate inventory/time, debit buyer, decrement inventory, create purchase, commit in one transaction.

@@ -4,6 +4,7 @@ import { createTestDrop, queryOne, resetTestData, seedCardPool } from "../helper
 import { signupUser } from "../helpers/auth";
 
 const app = createApp();
+const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36";
 
 describe("Marketplace concurrency", () => {
   beforeEach(async () => {
@@ -13,13 +14,15 @@ describe("Marketplace concurrency", () => {
 
   test("same listing cannot be bought twice concurrently", async () => {
     const drop = await createTestDrop({ inventory: 1, price: "10.00", cardsPerPack: 3 });
-    const seller = await signupUser(app, "seller");
-    const buyerA = await signupUser(app, "buyer-a");
-    const buyerB = await signupUser(app, "buyer-b");
+    const seller = await signupUser(app, "seller", { bypassHttp: true, accountAgeHours: 2 });
+    const buyerA = await signupUser(app, "buyer-a", { bypassHttp: true, accountAgeHours: 2 });
+    const buyerB = await signupUser(app, "buyer-b", { bypassHttp: true, accountAgeHours: 2 });
 
     const packBuy = await request(app)
       .post("/packs/buy")
       .set("authorization", `Bearer ${seller.token}`)
+      .set("user-agent", browserUA)
+      .set("x-forwarded-for", "203.0.113.10")
       .set("idempotency-key", "seller-pack")
       .send({ dropId: drop.id, idempotencyKey: "seller-pack" });
     expect(packBuy.status).toBe(200);
@@ -40,11 +43,15 @@ describe("Marketplace concurrency", () => {
       request(app)
         .post(`/listings/${listingId}/buy`)
         .set("authorization", `Bearer ${buyerA.token}`)
+        .set("user-agent", browserUA)
+        .set("x-forwarded-for", "203.0.113.11")
         .set("idempotency-key", "buyer-a-buy")
         .send({ idempotencyKey: "buyer-a-buy" }),
       request(app)
         .post(`/listings/${listingId}/buy`)
         .set("authorization", `Bearer ${buyerB.token}`)
+        .set("user-agent", browserUA)
+        .set("x-forwarded-for", "203.0.113.12")
         .set("idempotency-key", "buyer-b-buy")
         .send({ idempotencyKey: "buyer-b-buy" })
     ]);

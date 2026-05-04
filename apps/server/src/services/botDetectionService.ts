@@ -6,6 +6,7 @@ interface BotDetectionResult {
   isBot: boolean;
   score: BotScore;
   reasons: string[];
+  action: 'allow' | 'throttle' | 'block';
 }
 
 interface RequestMetadata {
@@ -22,17 +23,18 @@ function looksLikeUUID(value: string): boolean {
 export class BotDetector {
   private static readonly BOT_SCORE_KEY = 'bot_score';
   private static readonly REQUEST_TIMING_KEY = 'request_timing';
-  private static readonly SUSPICIOUS_IPS_KEY = 'suspicious_ips';
 
   async analyzeRequest(metadata: RequestMetadata): Promise<BotDetectionResult> {
     const reasons: string[] = [];
     let score = 0;
+    let highConfidenceBot = false;
 
     await this.trackAccountForIP(metadata.userId, metadata.ip);
 
-    const useragentScore = this.checkUserAgent(metadata.userAgent);
-    score += useragentScore;
-    if (useragentScore > 0.3) {
+    const userAgentResult = this.checkUserAgent(metadata.userAgent);
+    score += userAgentResult.score;
+    highConfidenceBot = highConfidenceBot || userAgentResult.highConfidence;
+    if (userAgentResult.score > 0.3) {
       reasons.push('suspicious_user_agent');
     }
 
@@ -61,62 +63,77 @@ export class BotDetector {
     }
 
     const finalScore = Math.min(score, 1.0);
+    const action = highConfidenceBot || finalScore >= BOT_DETECTION.highConfidenceBlockScore
+      ? 'block'
+      : finalScore >= BOT_DETECTION.throttleScoreThreshold
+        ? 'throttle'
+        : 'allow';
+
     await this.updateBotScore(metadata.userId, finalScore);
 
     return {
-      isBot: finalScore > BOT_DETECTION.botScoreThreshold,
+      isBot: action === 'block' || finalScore > BOT_DETECTION.botScoreThreshold,
       score: finalScore,
       reasons,
+      action,
     };
   }
 
-  private checkUserAgent(userAgent: string): number {
+  private checkUserAgent(userAgent: string): { score: number; highConfidence: boolean } {
     if (!userAgent || userAgent.length < 10) {
-      return 0.4;
+      return { score: 0.4, highConfidence: false };
     }
 
     const lowerUA = userAgent.toLowerCase();
     for (const suspicious of BOT_DETECTION.suspiciousUserAgents) {
       if (lowerUA.includes(suspicious)) {
-        return 0.8;
+        const highConfidence = ['curl', 'wget', 'python-requests', 'go-http-client'].some((token) => lowerUA.includes(token));
+        return { score: highConfidence ? 1 : 0.8, highConfidence };
       }
     }
 
-    return 0;
+    return { score: 0, highConfidence: false };
   }
 
   private async checkRequestTiming(userId: string, timestamp: number): Promise<number> {
     const key = `${BotDetector.REQUEST_TIMING_KEY}:${userId}`;
-    const now = Date.now();
+    const historyKey = `${key}:history`;
+    const keepCount = 10;
+
+    const script = `
+      local last_key = KEYS[1]
+      local history_key = KEYS[2]
+      local timestamp = tonumber(ARGV[1])
+      local keep_count = tonumber(ARGV[2])
+
+      local previous = redis.call('GET', last_key)
+      redis.call('SET', last_key, timestamp, 'EX', 3600)
+      redis.call('LPUSH', history_key, tostring(timestamp))
+      redis.call('LTRIM', history_key, 0, keep_count - 1)
+      redis.call('EXPIRE', history_key, 3600)
+      return {previous or '', unpack(redis.call('LRANGE', history_key, 0, keep_count - 1))}
+    `;
 
     try {
-      const lastRequest = await redis.get(key);
-      if (lastRequest) {
-        const interval = timestamp - parseInt(lastRequest);
+      const result = await redis.eval(script, 2, key, historyKey, timestamp, keepCount) as string[];
+      const previous = result[0];
+      const history = result.slice(1).map((value) => parseInt(value, 10)).filter((value) => !Number.isNaN(value)).reverse();
+
+      if (previous) {
+        const interval = timestamp - parseInt(previous, 10);
 
         if (interval < BOT_DETECTION.minHumanRequestInterval) {
           return 0.5;
         }
 
-        if (interval < BOT_DETECTION.maxBotTimingVariance * 2) {
-          const history = await redis.lrange(`${key}:history`, 0, -1);
-          if (history.length >= 3) {
-            const intervals = history.map((t, i) => {
-              if (i === 0) return 0;
-              return parseInt(t) - parseInt(history[i - 1]);
-            }).slice(1);
-
-            const variance = this.calculateVariance(intervals);
-            if (variance < BOT_DETECTION.maxBotTimingVariance) {
-              return 0.4;
-            }
+        if (history.length >= 4) {
+          const intervals = history.slice(1).map((value, index) => value - history[index]);
+          const variance = this.calculateVariance(intervals);
+          if (variance < BOT_DETECTION.maxBotTimingVariance) {
+            return 0.4;
           }
         }
       }
-
-      await redis.set(key, timestamp, 'EX', 3600);
-      await redis.lpush(`${key}:history`, timestamp.toString());
-      await redis.ltrim(`${key}:history`, 0, 9);
 
       return 0;
     } catch (error) {
@@ -128,7 +145,7 @@ export class BotDetector {
   private calculateVariance(intervals: number[]): number {
     if (intervals.length === 0) return 0;
     const mean = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-    const squareDiffs = intervals.map(val => Math.pow(val - mean, 2));
+    const squareDiffs = intervals.map((value) => Math.pow(value - mean, 2));
     return Math.sqrt(squareDiffs.reduce((a, b) => a + b, 0) / intervals.length);
   }
 
@@ -148,12 +165,7 @@ export class BotDetector {
       }
 
       const accountAge = (Date.now() - new Date(result.rows[0].created_at).getTime()) / 1000;
-
-      if (accountAge < BOT_DETECTION.minAccountAgeSeconds) {
-        return 0.3;
-      }
-
-      return 0;
+      return accountAge < BOT_DETECTION.minAccountAgeSeconds ? 0.3 : 0;
     } catch (error) {
       console.error('Account age check error:', error);
       return 0;
@@ -169,12 +181,7 @@ export class BotDetector {
       await redis.expire(requestCountKey, 86400);
 
       const uniqueAccounts = await redis.scard(accountsKey);
-
-      if (uniqueAccounts > BOT_DETECTION.maxAccountsPerIP) {
-        return 0.6;
-      }
-
-      return 0;
+      return uniqueAccounts > BOT_DETECTION.maxAccountsPerIP ? 0.6 : 0;
     } catch (error) {
       console.error('IP suspicious check error:', error);
       return 0;
@@ -214,13 +221,14 @@ export class BotDetector {
         return 0;
       }
 
-      const { pack_count, listing_count, bid_count } = result.rows[0];
+      const packCount = parseInt(result.rows[0].pack_count, 10);
+      const listingCount = parseInt(result.rows[0].listing_count, 10);
 
-      if (parseInt(pack_count) > 10) {
+      if (packCount > 10) {
         return 0.4;
       }
 
-      if (parseInt(listing_count) === 0 && parseInt(pack_count) > 5) {
+      if (listingCount === 0 && packCount > 5) {
         return 0.3;
       }
 

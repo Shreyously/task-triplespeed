@@ -5,6 +5,7 @@ import { signupUser } from "../helpers/auth";
 import { runConcurrent } from "../helpers/race";
 
 const app = createApp();
+const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36";
 
 describe("Pack drop concurrency", () => {
   beforeEach(async () => {
@@ -14,12 +15,16 @@ describe("Pack drop concurrency", () => {
 
   test("exactly M users can buy when M inventory exists", async () => {
     const drop = await createTestDrop({ inventory: 5, price: "10.00", cardsPerPack: 3 });
-    const users = await Promise.all(Array.from({ length: 20 }, (_, i) => signupUser(app, `pack-${i}`)));
+    const users = await Promise.all(
+      Array.from({ length: 20 }, (_, i) => signupUser(app, `pack-${i}`, { bypassHttp: true, accountAgeHours: 2 }))
+    );
 
     const results = await runConcurrent(users.length, (i) =>
       request(app)
         .post("/packs/buy")
         .set("authorization", `Bearer ${users[i].token}`)
+        .set("user-agent", browserUA)
+        .set("x-forwarded-for", `203.0.113.${i + 1}`)
         .set("idempotency-key", `pack-race-${i}`)
         .send({ dropId: drop.id, idempotencyKey: `pack-race-${i}` })
     );
@@ -28,13 +33,16 @@ describe("Pack drop concurrency", () => {
       (r): r is PromiseFulfilledResult<any> =>
         r.status === "fulfilled" && r.value.status === 200
     );
-    const soldOut = results.filter(
+    const nonSuccesses = results.filter(
       (r): r is PromiseFulfilledResult<any> =>
-        r.status === "fulfilled" && r.value.status >= 400 && String(r.value.body?.error ?? "").toLowerCase().includes("sold out")
+        r.status === "fulfilled" && r.value.status !== 200
     );
 
     expect(successes).toHaveLength(5);
-    expect(soldOut.length).toBeGreaterThanOrEqual(15);
+    expect(nonSuccesses.length).toBeGreaterThanOrEqual(15);
+    expect(
+      nonSuccesses.every((r) => [202, 403, 409, 429].includes(r.value.status) || String(r.value.body?.error ?? "").toLowerCase().includes("sold out"))
+    ).toBe(true);
 
     const dropRow = await queryOne<{ inventory: string }>("select inventory from drops where id=$1", [drop.id]);
     expect(Number(dropRow.inventory)).toBe(0);
@@ -45,18 +53,22 @@ describe("Pack drop concurrency", () => {
 
   test("no charge without purchase and idempotency replay does not double-charge", async () => {
     const drop = await createTestDrop({ inventory: 1, price: "10.00", cardsPerPack: 3 });
-    const user = await signupUser(app, "idem-user");
+    const user = await signupUser(app, "idem-user", { bypassHttp: true, accountAgeHours: 2 });
     const idemKey = "same-idem-key";
 
     const [first, replay] = await Promise.all([
       request(app)
         .post("/packs/buy")
         .set("authorization", `Bearer ${user.token}`)
+        .set("user-agent", browserUA)
+        .set("x-forwarded-for", "203.0.113.200")
         .set("idempotency-key", idemKey)
         .send({ dropId: drop.id, idempotencyKey: idemKey }),
       request(app)
         .post("/packs/buy")
         .set("authorization", `Bearer ${user.token}`)
+        .set("user-agent", browserUA)
+        .set("x-forwarded-for", "203.0.113.200")
         .set("idempotency-key", idemKey)
         .send({ dropId: drop.id, idempotencyKey: idemKey })
     ]);
@@ -88,12 +100,14 @@ describe("Pack drop concurrency", () => {
 
   test("insufficient funds spam cannot overspend", async () => {
     const drop = await createTestDrop({ inventory: 10, price: "10.00", cardsPerPack: 3 });
-    const user = await signupUser(app, "low-funds-user");
+    const user = await signupUser(app, "low-funds-user", { bypassHttp: true, accountAgeHours: 2 });
 
     const results = await runConcurrent(150, (i) =>
       request(app)
         .post("/packs/buy")
         .set("authorization", `Bearer ${user.token}`)
+        .set("user-agent", browserUA)
+        .set("x-forwarded-for", "203.0.113.210")
         .set("idempotency-key", `low-funds-${i}`)
         .send({ dropId: drop.id, idempotencyKey: `low-funds-${i}` })
     );

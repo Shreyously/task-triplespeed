@@ -7,6 +7,6 @@ import { asyncHandler } from "../../middleware/async";
 import { rateLimitMiddleware } from "../../middleware/rateLimit";
 
 export const authRoutes = Router();
-authRoutes.post("/signup", rateLimitMiddleware('AUTH'), validateBody(signupSchema), asyncHandler(signupController));
-authRoutes.post("/login", rateLimitMiddleware('AUTH'), validateBody(loginSchema), asyncHandler(loginController));
-authRoutes.get("/me", authMiddleware, rateLimitMiddleware('API'), asyncHandler(meController));
+authRoutes.post("/signup", rateLimitMiddleware({ type: 'AUTH', access: 'writeProtected' }), validateBody(signupSchema), asyncHandler(signupController));
+authRoutes.post("/login", rateLimitMiddleware({ type: 'AUTH', access: 'writeProtected' }), validateBody(loginSchema), asyncHandler(loginController));
+authRoutes.get("/me", authMiddleware, rateLimitMiddleware({ type: 'API', access: 'readOnly' }), asyncHandler(meController));

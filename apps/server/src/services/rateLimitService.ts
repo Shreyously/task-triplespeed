@@ -1,17 +1,114 @@
 import { redis } from "../db/redis";
-import { RATE_LIMITS } from "../config/antibot";
+import { FAIRNESS_CONFIG, RATE_LIMITS, type RateLimitType } from "../config/antibot";
 
-interface RateLimitResult {
-  allowed: boolean;
-  remaining: number;
-  resetAt: Date;
-  retryAfter?: number;
-}
+export type RateLimitFailureMode = 'normal' | 'degraded-open' | 'degraded-closed';
+export type RouteAccessPolicy = 'readOnly' | 'writeProtected';
 
 interface RateLimitConfig {
   limit: number;
   window: number;
 }
+
+interface BucketDefinition extends RateLimitConfig {
+  key: string;
+  name: string;
+}
+
+interface PackPurchaseRuntimeConfig {
+  perUserPerMinute: number;
+  perUserPerHour: number;
+  perUserPerDay: number;
+  perIPPerMinute: number;
+  perIPPerHour: number;
+}
+
+export interface RateLimitResult {
+  allowed: boolean;
+  remaining: number;
+  resetAt: Date;
+  retryAfter?: number;
+  limit: number;
+  blockedBy?: string;
+  failureMode: RateLimitFailureMode;
+  degraded: boolean;
+}
+
+export interface RouteRateLimitPolicy {
+  type: RateLimitType;
+  access: RouteAccessPolicy;
+}
+
+interface CheckRateLimitOptions {
+  botScore?: number;
+}
+
+interface CombinedEvalResult {
+  allowed: boolean;
+  remaining: number;
+  retryAfter?: number;
+  limit: number;
+  blockedBy?: string;
+  resetAt: Date;
+}
+
+const COMBINED_SLIDING_WINDOW_SCRIPT = `
+  local now = tonumber(ARGV[1])
+  local request_id = ARGV[2]
+  local blocked = false
+  local blocked_by = ''
+  local retry_after_ms = nil
+  local tightest_remaining_after = nil
+  local tightest_limit_after = nil
+  local tightest_window_ms_after = nil
+
+  for i = 1, #KEYS do
+    local arg_index = 3 + ((i - 1) * 3)
+    local limit = tonumber(ARGV[arg_index])
+    local window_ms = tonumber(ARGV[arg_index + 1])
+    local bucket_name = ARGV[arg_index + 2]
+    local key = KEYS[i]
+    local window_start = now - window_ms
+
+    redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
+    local count = redis.call('ZCARD', key)
+    local remaining_after = limit - count - 1
+
+    if tightest_remaining_after == nil or remaining_after < tightest_remaining_after or (remaining_after == tightest_remaining_after and limit < tightest_limit_after) then
+      tightest_remaining_after = remaining_after
+      tightest_limit_after = limit
+      tightest_window_ms_after = window_ms
+    end
+
+    if count >= limit then
+      local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+      local release_at = now + window_ms
+      if oldest[2] ~= nil then
+        release_at = tonumber(oldest[2]) + window_ms
+      end
+
+      local bucket_retry_after_ms = math.max(1, release_at - now)
+      if retry_after_ms == nil or bucket_retry_after_ms < retry_after_ms then
+        retry_after_ms = bucket_retry_after_ms
+        blocked_by = bucket_name
+      end
+      blocked = true
+    end
+  end
+
+  if blocked then
+    return {0, math.max(tightest_remaining_after or 0, 0), math.ceil((retry_after_ms or 1000) / 1000), tightest_limit_after or 0, blocked_by, now + (retry_after_ms or 1000)}
+  end
+
+  for i = 1, #KEYS do
+    local arg_index = 3 + ((i - 1) * 3)
+    local window_ms = tonumber(ARGV[arg_index + 1])
+    local key = KEYS[i]
+    redis.call('ZADD', key, now, now .. ':' .. request_id .. ':' .. i)
+    redis.call('PEXPIRE', key, window_ms + 1000)
+  end
+
+  return {1, math.max(tightest_remaining_after or 0, 0), 0, tightest_limit_after or 0, '', now + (tightest_window_ms_after or 1000)}
+`;
 
 export class RateLimiter {
   constructor(private prefix: string) {}
@@ -20,63 +117,20 @@ export class RateLimiter {
     identifier: string,
     config: RateLimitConfig
   ): Promise<RateLimitResult> {
-    const key = `${this.prefix}:${identifier}`;
-    const now = Date.now();
-    const windowStart = now - config.window * 1000;
+    const result = await evaluateCombinedBuckets([
+      {
+        key: `${this.prefix}:${identifier}`,
+        name: identifier,
+        limit: config.limit,
+        window: config.window,
+      },
+    ]);
 
-    const script = `
-      local key = KEYS[1]
-      local now = tonumber(ARGV[1])
-      local window_start = tonumber(ARGV[2])
-      local limit = tonumber(ARGV[3])
-      local window_ms = tonumber(ARGV[4])
-
-      local unique_id = ARGV[5]
-
-      redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
-      local count = redis.call('ZCARD', key)
-
-      if count < limit then
-        redis.call('ZADD', key, now, now .. '-' .. unique_id)
-        redis.call('EXPIRE', key, math.ceil(window_ms / 1000) + 1)
-        return {count + 1, limit - count - 1, 0}
-      else
-        local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
-        local retry_after = oldest[2] and math.ceil((oldest[2] + window_ms - now) / 1000) or 1
-        return {count, -1, retry_after}
-      end
-    `;
-
-    const uniqueId = Math.random().toString(36).substring(2, 15);
-
-    try {
-      const result = await redis.eval(
-        script,
-        1,
-        key,
-        now,
-        windowStart,
-        config.limit,
-        config.window * 1000,
-        uniqueId
-      ) as [number, number, number];
-
-      const [count, remaining, retryAfter] = result;
-
-      return {
-        allowed: remaining >= 0,
-        remaining: Math.max(0, remaining),
-        resetAt: new Date(now + config.window * 1000),
-        retryAfter: retryAfter > 0 ? retryAfter : undefined,
-      };
-    } catch (error) {
-      console.error('Rate limiter error:', error);
-      return {
-        allowed: true,
-        remaining: config.limit,
-        resetAt: new Date(now + config.window * 1000),
-      };
-    }
+    return {
+      ...result,
+      failureMode: 'normal',
+      degraded: false,
+    };
   }
 
   async reset(identifier: string): Promise<void> {
@@ -91,120 +145,131 @@ export class RateLimiter {
   }
 }
 
-export const apiRateLimiter = new RateLimiter('rate_limit:api');
-export const packPurchaseRateLimiter = new RateLimiter('rate_limit:pack_purchase');
-export const authRateLimiter = new RateLimiter('rate_limit:auth');
-export const marketplaceRateLimiter = new RateLimiter('rate_limit:marketplace');
+function applyPackPurchaseBotTightening(
+  config: typeof RATE_LIMITS.PACK_PURCHASE,
+  botScore = 0
+): PackPurchaseRuntimeConfig {
+  if (botScore < 0.45) {
+    return {
+      perUserPerMinute: config.perUserPerMinute,
+      perUserPerHour: config.perUserPerHour,
+      perUserPerDay: config.perUserPerDay,
+      perIPPerMinute: config.perIPPerMinute,
+      perIPPerHour: config.perIPPerHour,
+    };
+  }
+
+  const tighten = (value: number) => Math.max(1, Math.floor(value * FAIRNESS_CONFIG.degradedIPLimitFactor));
+
+  return {
+    ...config,
+    perUserPerMinute: tighten(config.perUserPerMinute),
+    perUserPerHour: tighten(config.perUserPerHour),
+    perUserPerDay: tighten(config.perUserPerDay),
+    perIPPerMinute: tighten(config.perIPPerMinute),
+    perIPPerHour: tighten(config.perIPPerHour),
+  };
+}
+
+function getBucketDefinitions(
+  userId: string,
+  ip: string,
+  type: RateLimitType,
+  botScore = 0
+): BucketDefinition[] {
+  switch (type) {
+    case 'PACK_PURCHASE': {
+      const config = applyPackPurchaseBotTightening(RATE_LIMITS.PACK_PURCHASE, botScore);
+      return [
+        { key: `rate_limit:pack_purchase:user:${userId}:minute`, name: 'user:minute', limit: config.perUserPerMinute, window: 60 },
+        { key: `rate_limit:pack_purchase:user:${userId}:hour`, name: 'user:hour', limit: config.perUserPerHour, window: 3600 },
+        { key: `rate_limit:pack_purchase:user:${userId}:day`, name: 'user:day', limit: config.perUserPerDay, window: 86400 },
+        { key: `rate_limit:pack_purchase:ip:${ip}:minute`, name: 'ip:minute', limit: config.perIPPerMinute, window: 60 },
+        { key: `rate_limit:pack_purchase:ip:${ip}:hour`, name: 'ip:hour', limit: config.perIPPerHour, window: 3600 },
+      ];
+    }
+    case 'AUTH':
+      return [
+        { key: `rate_limit:auth:ip:${ip}:minute`, name: 'ip:minute', limit: RATE_LIMITS.AUTH.perIPPerMinute, window: 60 },
+        { key: `rate_limit:auth:ip:${ip}:hour`, name: 'ip:hour', limit: RATE_LIMITS.AUTH.perIPPerHour, window: 3600 },
+      ];
+    case 'API':
+      return [
+        { key: `rate_limit:api:user:${userId}:minute`, name: 'user:minute', limit: RATE_LIMITS.API.perUserPerMinute, window: 60 },
+        { key: `rate_limit:api:ip:${ip}:minute`, name: 'ip:minute', limit: RATE_LIMITS.API.perIPPerMinute, window: 60 },
+      ];
+    case 'MARKETPLACE':
+      return [
+        { key: `rate_limit:marketplace:user:${userId}:hour`, name: 'user:hour', limit: RATE_LIMITS.MARKETPLACE.perUserPerHour, window: 3600 },
+        { key: `rate_limit:marketplace:ip:${ip}:hour`, name: 'ip:hour', limit: RATE_LIMITS.MARKETPLACE.perIPPerHour, window: 3600 },
+      ];
+    default:
+      return [];
+  }
+}
+
+async function evaluateCombinedBuckets(buckets: BucketDefinition[]): Promise<CombinedEvalResult> {
+  const now = Date.now();
+  const requestId = `${now}:${Math.random().toString(36).slice(2)}`;
+  const keys = buckets.map((bucket) => bucket.key);
+  const args = [
+    now.toString(),
+    requestId,
+    ...buckets.flatMap((bucket) => [bucket.limit.toString(), (bucket.window * 1000).toString(), bucket.name]),
+  ];
+
+  const result = await redis.eval(
+    COMBINED_SLIDING_WINDOW_SCRIPT,
+    keys.length,
+    ...keys,
+    ...args
+  ) as [number, number, number, number, string, number];
+
+  const [allowedCode, remaining, retryAfter, limit, blockedBy, resetAt] = result;
+
+  return {
+    allowed: allowedCode === 1,
+    remaining: Math.max(0, Number(remaining)),
+    retryAfter: Number(retryAfter) > 0 ? Number(retryAfter) : undefined,
+    limit: Number(limit),
+    blockedBy: blockedBy || undefined,
+    resetAt: new Date(Number(resetAt)),
+  };
+}
+
+function degradedResult(policy: RouteRateLimitPolicy, type: RateLimitType): RateLimitResult {
+  const fallbackLimit = getBucketDefinitions('anonymous', 'unknown', type)[0]?.limit ?? 100;
+  const failureMode: RateLimitFailureMode = policy.access === 'readOnly' ? 'degraded-open' : 'degraded-closed';
+
+  return {
+    allowed: policy.access === 'readOnly',
+    remaining: fallbackLimit,
+    resetAt: new Date(Date.now() + 60000),
+    retryAfter: policy.access === 'readOnly' ? undefined : 30,
+    limit: fallbackLimit,
+    blockedBy: policy.access === 'readOnly' ? undefined : 'redis_unavailable',
+    failureMode,
+    degraded: true,
+  };
+}
 
 export async function checkRateLimits(
   userId: string,
   ip: string,
-  type: keyof typeof RATE_LIMITS
+  policy: RouteRateLimitPolicy,
+  options: CheckRateLimitOptions = {}
 ): Promise<RateLimitResult> {
-  switch (type) {
-    case 'PACK_PURCHASE': {
-      const configs = RATE_LIMITS['PACK_PURCHASE'];
+  const buckets = getBucketDefinitions(userId, ip, policy.type, options.botScore);
 
-      const userMinuteCheck = await packPurchaseRateLimiter.check(
-        `user:${userId}:minute`,
-        { limit: configs.perUserPerMinute, window: 60 }
-      );
-
-      if (!userMinuteCheck.allowed) {
-        return userMinuteCheck;
-      }
-
-      const userHourCheck = await packPurchaseRateLimiter.check(
-        `user:${userId}:hour`,
-        { limit: configs.perUserPerHour, window: 3600 }
-      );
-
-      if (!userHourCheck.allowed) {
-        return userHourCheck;
-      }
-
-      const userDayCheck = await packPurchaseRateLimiter.check(
-        `user:${userId}:day`,
-        { limit: configs.perUserPerDay, window: 86400 }
-      );
-
-      if (!userDayCheck.allowed) {
-        return userDayCheck;
-      }
-
-      const ipMinuteCheck = await packPurchaseRateLimiter.check(
-        `ip:${ip}:minute`,
-        { limit: configs.perIPPerMinute, window: 60 }
-      );
-
-      if (!ipMinuteCheck.allowed) {
-        return ipMinuteCheck;
-      }
-
-      const ipHourCheck = await packPurchaseRateLimiter.check(
-        `ip:${ip}:hour`,
-        { limit: configs.perIPPerHour, window: 3600 }
-      );
-
-      return ipHourCheck;
-    }
-
-    case 'AUTH': {
-      const configs = RATE_LIMITS['AUTH'];
-      const ipMinuteCheck = await authRateLimiter.check(
-        `ip:${ip}:minute`,
-        { limit: configs.perIPPerMinute, window: 60 }
-      );
-
-      if (!ipMinuteCheck.allowed) {
-        return ipMinuteCheck;
-      }
-
-      return authRateLimiter.check(
-        `ip:${ip}:hour`,
-        { limit: configs.perIPPerHour, window: 3600 }
-      );
-    }
-
-    case 'API': {
-      const configs = RATE_LIMITS['API'];
-      const userCheck = await apiRateLimiter.check(
-        `user:${userId}`,
-        { limit: configs.perUserPerMinute, window: 60 }
-      );
-
-      if (!userCheck.allowed) {
-        return userCheck;
-      }
-
-      return apiRateLimiter.check(
-        `ip:${ip}`,
-        { limit: configs.perIPPerMinute, window: 60 }
-      );
-    }
-
-    case 'MARKETPLACE': {
-      const configs = RATE_LIMITS['MARKETPLACE'];
-      const userCheck = await marketplaceRateLimiter.check(
-        `user:${userId}`,
-        { limit: configs.perUserPerHour, window: 3600 }
-      );
-
-      if (!userCheck.allowed) {
-        return userCheck;
-      }
-
-      return marketplaceRateLimiter.check(
-        `ip:${ip}`,
-        { limit: configs.perIPPerHour, window: 3600 }
-      );
-    }
-
-    default:
-      return {
-        allowed: true,
-        remaining: 100,
-        resetAt: new Date(Date.now() + 60000),
-      };
+  try {
+    const result = await evaluateCombinedBuckets(buckets);
+    return {
+      ...result,
+      failureMode: 'normal',
+      degraded: false,
+    };
+  } catch (error) {
+    console.error('Rate limiter error:', error);
+    return degradedResult(policy, policy.type);
   }
 }

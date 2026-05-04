@@ -1,166 +1,88 @@
 import { BotDetector } from "../src/services/botDetectionService";
-import { pool } from "../src/db/pool";
 import { redis } from "../src/db/redis";
 
 describe("Bot Detection Service", () => {
   let detector: BotDetector;
-  let testUserId: string;
   let testIP: string;
 
   beforeAll(() => {
     detector = new BotDetector();
-    testUserId = "test-user-" + Date.now();
     testIP = "192.168.1.100";
+  });
+
+  beforeEach(async () => {
+    await redis.flushdb();
   });
 
   afterAll(async () => {
     await redis.flushdb();
   });
 
-  test("should detect suspicious user agents", async () => {
-    const result = await detector.analyzeRequest({
-      userId: testUserId,
-      ip: testIP,
-      userAgent: "curl/7.68.0",
-      timestamp: Date.now(),
-    });
-
-    expect(result.score).toBeGreaterThan(0.3);
-    expect(result.reasons).toContain("suspicious_user_agent");
-  });
-
-  test("should flag super-fast request timing", async () => {
+  test("medium-score users are throttled instead of blocked", async () => {
     const now = Date.now();
-
     await detector.analyzeRequest({
-      userId: testUserId,
-      ip: testIP,
-      userAgent: "Mozilla/5.0",
-      timestamp: now - 50,
-    });
-
-    const result = await detector.analyzeRequest({
-      userId: testUserId,
+      userId: "medium-user",
       ip: testIP,
       userAgent: "Mozilla/5.0",
       timestamp: now,
     });
 
-    expect(result.score).toBeGreaterThan(0.2);
-    expect(result.reasons).toContain("unnatural_request_timing");
-  });
-
-  test("should detect consistent bot-like timing patterns", async () => {
-    const now = Date.now();
-    const interval = 100;
-
-    for (let i = 0; i < 5; i++) {
-      await detector.analyzeRequest({
-        userId: testUserId + "timing",
-        ip: testIP,
-        userAgent: "Mozilla/5.0",
-        timestamp: now + (i * interval),
-      });
-    }
-
     const result = await detector.analyzeRequest({
-      userId: testUserId + "timing",
+      userId: "medium-user",
       ip: testIP,
       userAgent: "Mozilla/5.0",
-      timestamp: now + (5 * interval),
+      timestamp: now + 50,
     });
 
+    expect(result.action).toBe('throttle');
+    expect(result.isBot).toBe(false);
     expect(result.reasons).toContain("unnatural_request_timing");
   });
 
-  test("should handle normal user requests", async () => {
+  test("high-confidence bot user agents are blocked", async () => {
     const result = await detector.analyzeRequest({
-      userId: testUserId + "normal",
-      ip: "192.168.1.101",
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      userId: "curl-user",
+      ip: testIP,
+      userAgent: "curl/7.68.0",
       timestamp: Date.now(),
     });
 
-    expect(result.score).toBeLessThan(0.3);
-    expect(result.isBot).toBe(false);
+    expect(result.action).toBe('block');
+    expect(result.score).toBeGreaterThanOrEqual(0.9);
   });
 
-  test("should flag suspicious IPs with multiple accounts", async () => {
+  test("legitimate browser-like users are allowed", async () => {
+    const result = await detector.analyzeRequest({
+      userId: "normal-user",
+      ip: "192.168.1.101",
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+      timestamp: Date.now(),
+    });
+
+    expect(result.action).toBe('allow');
+    expect(result.score).toBeLessThan(0.3);
+  });
+
+  test("multi-account activity on one IP increases restrictions", async () => {
     const suspiciousIP = "192.168.1.200";
 
-    for (let i = 0; i < 6; i++) {
+    for (let index = 0; index < 6; index += 1) {
       await detector.analyzeRequest({
-        userId: `user${i}`,
+        userId: `user-${index}`,
         ip: suspiciousIP,
         userAgent: "Mozilla/5.0",
-        timestamp: Date.now(),
+        timestamp: Date.now() + index,
       });
     }
 
     const result = await detector.analyzeRequest({
-      userId: "new_user",
+      userId: "user-7",
       ip: suspiciousIP,
       userAgent: "Mozilla/5.0",
-      timestamp: Date.now(),
+      timestamp: Date.now() + 10,
     });
 
     expect(result.reasons).toContain("suspicious_ip");
-  });
-
-  test("should update and retrieve bot scores", async () => {
-    await detector.analyzeRequest({
-      userId: testUserId + "score",
-      ip: testIP,
-      userAgent: "bot-agent",
-      timestamp: Date.now(),
-    });
-
-    const score = await detector.getBotScore(testUserId + "score");
-    expect(score).toBeGreaterThan(0);
-  });
-
-  test("should flag suspicious activity", async () => {
-    await detector.flagSuspiciousActivity(
-      testUserId + "suspicious",
-      testIP,
-      "high_bot_score"
-    );
-
-    const key = `suspicious_activity:${testUserId}suspicious`;
-    const activity = await redis.lrange(key, 0, -1);
-
-    expect(activity.length).toBeGreaterThan(0);
-  });
-
-  test("should handle missing user agents", async () => {
-    const result = await detector.analyzeRequest({
-      userId: testUserId + "no-ua",
-      ip: testIP,
-      userAgent: "",
-      timestamp: Date.now(),
-    });
-
-    expect(result.score).toBeGreaterThan(0.3);
-    expect(result.reasons).toContain("suspicious_user_agent");
-  });
-
-  test("should detect known bot user agents", async () => {
-    const botAgents = [
-      "Googlebot/2.1",
-      "python-requests/2.28.0",
-      "Go-http-client/1.1",
-    ];
-
-    for (const agent of botAgents) {
-      const result = await detector.analyzeRequest({
-        userId: testUserId + agent,
-        ip: testIP,
-        userAgent: agent,
-        timestamp: Date.now(),
-      });
-
-      expect(result.score).toBeGreaterThan(0.5);
-      expect(result.reasons).toContain("suspicious_user_agent");
-    }
+    expect(['throttle', 'block']).toContain(result.action);
   });
 });

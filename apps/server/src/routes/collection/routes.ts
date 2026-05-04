@@ -5,6 +5,6 @@ import { asyncHandler } from "../../middleware/async";
 import { rateLimitMiddleware } from "../../middleware/rateLimit";
 
 export const collectionRoutes = Router();
-collectionRoutes.get("/collection", authMiddleware, rateLimitMiddleware('API'), asyncHandler(collectionController));
-collectionRoutes.get("/portfolio/summary", authMiddleware, rateLimitMiddleware('API'), asyncHandler(portfolioSummaryController));
-collectionRoutes.get("/portfolio/history", authMiddleware, rateLimitMiddleware('API'), asyncHandler(portfolioHistoryController));
+collectionRoutes.get("/collection", authMiddleware, rateLimitMiddleware({ type: 'API', access: 'readOnly' }), asyncHandler(collectionController));
+collectionRoutes.get("/portfolio/summary", authMiddleware, rateLimitMiddleware({ type: 'API', access: 'readOnly' }), asyncHandler(portfolioSummaryController));
+collectionRoutes.get("/portfolio/history", authMiddleware, rateLimitMiddleware({ type: 'API', access: 'readOnly' }), asyncHandler(portfolioHistoryController));

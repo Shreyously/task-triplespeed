@@ -23,7 +23,11 @@ export const RATE_LIMITS = {
 export const FAIRNESS_CONFIG = {
   inventoryThreshold: 0.20,
   fairnessWindowSeconds: 30,
+  claimWindowSeconds: 45,
   maxProcessingTimeSeconds: 10,
+  contentionWindowSeconds: 15,
+  contentionRequestThreshold: 10,
+  degradedIPLimitFactor: 0.5,
 } as const;
 
 export const BOT_DETECTION = {
@@ -32,6 +36,8 @@ export const BOT_DETECTION = {
   maxAccountsPerIP: 5,
   minAccountAgeSeconds: 3600,
   botScoreThreshold: 0.7,
+  throttleScoreThreshold: 0.45,
+  highConfidenceBlockScore: 0.9,
   suspiciousActivityThreshold: 3,
   suspiciousUserAgents: [
     'bot', 'crawler', 'spider', 'scraper',
@@ -49,4 +55,4 @@ export const ACCOUNT_LIMITS = {
 
 export type RateLimitType = keyof typeof RATE_LIMITS;
 export type BotScore = number;
-export type FairnessStatus = 'NORMAL' | 'FAIRNESS_MODE' | 'PROCESSING';
+export type FairnessStatus = 'NORMAL' | 'FAIRNESS_MODE' | 'PROCESSING' | 'CLAIMABLE';

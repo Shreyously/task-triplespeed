@@ -185,6 +185,95 @@ Approximate EV per pack from current weights:
 - **Pro (5 cards):** EV/card `~3.31`, EV/pack `~16.57`, Margin vs $15 `~-1.57`
 - **Elite (7 cards):** EV/card `~10.70`, EV/pack `~74.90`, Margin vs $40 `~-34.90`
 
+### B1 Pack Economics Optimization System
+
+**Overview**: The B1 system is a sophisticated rarity weight optimizer that maintains target platform margins while ensuring acceptable user win rates through mathematical optimization and Monte Carlo validation.
+
+**Core Mathematical Algorithm**:
+
+1. **Binary Search Optimization**
+   - Constructs two endpoint weight vectors:
+     - `w_profit`: Max weight on cheapest rarities (maximizes platform margin)
+     - `w_excite`: Max weight on most expensive rarities (maximizes user EV/variance)
+   - Binary search on interpolation parameter `α ∈ [0,1]` to find `α*` where:
+     ```
+     EV(α) = N × Σᵣ w(α)[r] × μᵣ = P × (1 - M)
+     ```
+     Where `N` = cards per pack, `μᵣ` = market average for rarity `r`, `P` = pack price, `M` = target margin
+   - Converges to `<0.0001%` error in 50 iterations
+
+2. **Monte Carlo Validation Engine**
+   - Runs 10,000 simulations per optimization cycle
+   - Uses actual database card values grouped by rarity (not just averages)
+   - Computes comprehensive statistics:
+     - Mean/median/stddev pack values
+     - Percentile distribution (p5, p10, p25, p50, p75, p90, p95)
+     - Win rate: fraction where `pack_value >= pack_price`
+     - Projected profit per 1,000/10,000 packs
+     - Rarity hit rates vs. target weights
+
+**Mathematical Constraints and Parameters**:
+
+| Parameter | Value | Mathematical Purpose |
+|---|---|---|
+| `TARGET_MARGIN` | `0.20` (20%) | Platform gross margin target |
+| `WIN_RATE_FLOOR` | `0.25` (25%) | Minimum "winning" pack rate for retention |
+| `MAX_WEIGHT_DELTA` | `±0.08` (±8%) | Prevents whiplash from price volatility |
+| `DRIFT_THRESHOLD` | `0.05` (5%) | Triggers rebalance when margin drifts >5% |
+| `MARGINAL_WIN_RATE_BUFFER` | `0.02` (2%) | Warning buffer above win-rate floor |
+| `MAX_MARGIN_CONCESSION` | `0.05` (5%) | Maximum margin sacrifice for win-rate adjustment |
+| `SIMULATION_RUNS` | `10,000` | Monte Carlo sample size for validation |
+
+**Weight Bounds per Rarity** (min/max to prevent degenerate solutions):
+```
+Common:           [0.15, 0.85]
+Uncommon:         [0.08, 0.50]
+Rare:             [0.02, 0.35]
+Holo Rare:        [0.01, 0.25]
+Ultra Rare/EX/GX: [0.005, 0.15]
+Secret Rare:      [0.002, 0.08]
+```
+
+**Acceptance Rules** (ALL must pass for activation):
+1. **Margin Rule**: `simulated_margin >= target_margin`
+2. **Win-Rate Rule**: `win_rate >= WIN_RATE_FLOOR`
+3. **Bounds Rule**: All weights within `[min, max]` per rarity
+4. **Delta Cap Rule**: `|new_weight - current_weight| <= MAX_WEIGHT_DELTA`
+5. **Normalization Rule**: `Σ weights = 1.0 ± 0.001`
+
+**Feasibility Classification**:
+- **FEASIBLE**: Passes all acceptance rules with healthy buffer
+- **MARGINAL**: Passes but within 2% of win-rate floor (monitor closely)
+- **INFEASIBLE**: Fails acceptance rules (rejected, current config kept active)
+
+**Win-Rate Adjustment Algorithm**:
+When Monte Carlo shows `win_rate < WIN_RATE_FLOOR`:
+1. Increment `α` by `WIN_RATE_ALPHA_BUMP` (0.02)
+2. Recompute weights and validate margin concession (max 5% below target)
+3. Re-run Monte Carlo validation
+4. Repeat until win-rate satisfied or margin concession exceeded
+5. If still infeasible → reject candidate, keep current config
+
+**Drift Detection and Rebalancing**:
+- Background worker checks each tier's `active_margin` against live prices every 15 minutes
+- Computes: `drift = |current_active_margin - target_margin|`
+- Triggers rebalance when: `drift > DRIFT_THRESHOLD`
+- Manual triggers: bootstrap, price anomalies, administrative requests
+
+**Version Control System**:
+- Each optimization creates versioned config with:
+  - Rarity weights and market snapshot
+  - Analytical EV and simulated metrics
+  - Trigger reason and timestamp
+- Only one config active per tier (enforced by database constraint)
+- Complete audit trail for debugging and rollback
+
+**Mathematic Properties**:
+- **Monotonicity**: EV increases monotonically with α (enables binary search)
+- **Convexity**: Weight space is convex (linear interpolation between valid vectors)
+- **Convergence**: Binary search guaranteed to find α* satisfying EV constraint
+- **Robustness**: Delta cap prevents large jumps, Monte Carlo catches edge cases
+
 ### Interpretation
 
 Current parameters intentionally favor excitement in higher tiers, but make top-tier pack EV economically aggressive (negative gross pack margin under midpoint assumptions). In Part A this is acceptable for engagement-first simulation, but **not long-term sustainable without rebalancing**.
@@ -194,7 +283,7 @@ Monetization currently comes from:
 - Trade fee `5%`
 - Auction fee `7%`
 
-Planned Part B lever: tune tier prices and/or rarity weights dynamically to hit target blended margin while preserving “occasional win” feel.
+**Current Status**: The B1 optimization system now automatically maintains target margins while preserving user experience. The system continuously monitors market conditions and rebalances rarity weights when margins drift beyond 5% threshold.
 
 Plain English:
 - Right now, higher tiers are very generous to players on average.
@@ -273,7 +362,7 @@ Considered, but row-level DB locks already provide stronger correctness with low
 Considered for audit extensibility, deferred in favor of simpler ACID transaction flows to reduce implementation risk in trial timebox.
 
 4. **Dynamic pricing/odds rebalancer**  
-Considered for economics optimization, deferred to Part B where EV tuning and abuse resistance are explicitly tested.
+**IMPLEMENTED**: The B1 pack economics optimization system now provides automated rebalancing with Monte Carlo validation, drift detection, and version-controlled configurations.
 
 ---
 
@@ -293,3 +382,92 @@ Realtime fanout and single-node socket architecture, then DB hot-row/write press
 
 - **Pack EV math and parameter choices?**  
 Documented above with code-accurate weights/prices; current model intentionally high-variance and engagement-forward, with explicit need for Part B rebalancing.
+
+---
+
+## 9) Part B2 hardening design
+
+### Redis-first atomic sliding windows
+
+B2 moves request limiting from sequential per-bucket checks to a single Redis Lua evaluation per route class. We kept sorted-set sliding windows instead of fixed counters because they provide precise rolling windows under bursty contention and survive process restarts across multiple API instances.
+
+For each request, the script:
+- trims expired members from every relevant bucket
+- evaluates all bucket counts before consuming anything
+- rejects immediately if any bucket is saturated
+- inserts the new request into every bucket only when all buckets pass
+
+This removes the old partial-consumption failure mode where an earlier window could be charged before a later window rejected the same request. It also guarantees that 100 concurrent requests on one hot key admit exactly the configured limit.
+
+Key families:
+- `rate_limit:api:user:<userId>:minute`
+- `rate_limit:api:ip:<ip>:minute`
+- `rate_limit:auth:ip:<ip>:minute|hour`
+- `rate_limit:pack_purchase:user:<userId>:minute|hour|day`
+- `rate_limit:pack_purchase:ip:<ip>:minute|hour`
+- `rate_limit:marketplace:user:<userId>:hour`
+- `rate_limit:marketplace:ip:<ip>:hour`
+
+TTL semantics:
+- each sorted set gets a `PEXPIRE` slightly longer than its window
+- the set self-cleans via `ZREMRANGEBYSCORE` on every request
+- no SQL persistence is required because this state is transient enforcement state
+
+### Hybrid Redis outage behavior
+
+Redis outage handling is explicit and route-class aware:
+- `PACK_PURCHASE`, `AUTH`, and `MARKETPLACE` write paths fail closed with `503`
+- read-only `API` routes degrade open and emit degraded headers plus warning logs
+
+This preserves anti-bot integrity on contested or state-changing flows while avoiding a full read outage for low-risk list/read endpoints.
+
+### Automatic fairness window
+
+The fairness queue concept remains Redis-backed and ephemeral, but B2 changes it from a manual queue into an automatic short-window lottery:
+- fairness opens only when the drop is under pressure
+- pressure combines low remaining inventory ratio with active short-interval contention
+- eligible users receive at most one entry per drop per window
+- after the window closes, the server deterministically selects winners up to current inventory
+- winners receive a claimable slot; losers are told they lost without being charged
+
+Deterministic winner selection is based on sorting participants by `SHA256(dropId, windowId, userId)`. This keeps the outcome testable and reproducible for a fixed input set while still removing fastest-client determinism.
+
+Key families:
+- `fairness_status:<dropId>`
+- `fairness_window:<dropId>`
+- `fairness_requests:<dropId>` for contention pressure
+- `fairness_entries:<dropId>:<windowId>` for per-user queue metadata
+- `fairness_results:<dropId>:<windowId>` for `AVAILABLE|CLAIMED|CONSUMED|LOST`
+- `fairness_processing_lock:<dropId>` for single-window processing ownership
+
+TTL semantics:
+- contention keys live only for the short contention interval
+- active fairness window metadata lives through queue open plus claim time
+- results expire after the claim window because they are transient purchase rights, not financial truth
+
+### Soft-first bot handling
+
+The bot detector still uses multi-signal scoring, but the action ladder changes:
+- low score: allow normally
+- medium score: throttle by tightening pack purchase limits and forcing fairness participation when fairness is relevant
+- high-confidence indicators: block immediately
+
+Signals retained in B2:
+- suspicious user agents
+- too-fast repeated timing
+- low timing variance across repeated attempts
+- very new account age
+- many accounts on one IP
+- purchase-heavy behavior without normal marketplace participation
+
+Timing/history tracking that feeds enforcement is now updated atomically in Redis so the signal path itself is less race-prone.
+
+### Observability
+
+B2 emits structured logs around:
+- limiter degraded-open / degraded-closed events
+- fairness window open and process events
+- fairness participant and winner counts
+- bot blocking and suspicious activity flags
+
+These logs are intentionally shaped so a later metrics pipeline or dashboard can consume them without changing the core enforcement flow again.

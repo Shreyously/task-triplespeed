@@ -14,8 +14,8 @@ import { asyncHandler } from "../../middleware/async";
 import { rateLimitMiddleware } from "../../middleware/rateLimit";
 
 export const auctionRoutes = Router();
-auctionRoutes.get("/auctions/live", rateLimitMiddleware('API'), asyncHandler(listLiveAuctionsController));
-auctionRoutes.get("/auctions/:id/snapshot", authMiddleware, rateLimitMiddleware('API'), asyncHandler(auctionSnapshotController));
-auctionRoutes.post("/auctions", authMiddleware, rateLimitMiddleware('API'), validateBody(createAuctionSchema), asyncHandler(createAuctionController));
-auctionRoutes.post("/auctions/:id/bids", authMiddleware, requireIdempotency, rateLimitMiddleware('API'), validateBody(placeBidSchema), asyncHandler(placeBidController));
+auctionRoutes.get("/auctions/live", rateLimitMiddleware({ type: 'API', access: 'readOnly' }), asyncHandler(listLiveAuctionsController));
+auctionRoutes.get("/auctions/:id/snapshot", authMiddleware, rateLimitMiddleware({ type: 'API', access: 'readOnly' }), asyncHandler(auctionSnapshotController));
+auctionRoutes.post("/auctions", authMiddleware, rateLimitMiddleware({ type: 'API', access: 'writeProtected' }), validateBody(createAuctionSchema), asyncHandler(createAuctionController));
+auctionRoutes.post("/auctions/:id/bids", authMiddleware, requireIdempotency, rateLimitMiddleware({ type: 'API', access: 'writeProtected' }), validateBody(placeBidSchema), asyncHandler(placeBidController));
 auctionRoutes.post("/workers/settlement/tick", asyncHandler(settlementTickController));
