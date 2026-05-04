@@ -1,9 +1,16 @@
 import { PoolClient } from "pg";
 
-export async function createPackPurchase(client: PoolClient, userId: string, dropId: string, price: string, idempotencyKey: string) {
+export async function createPackPurchase(
+  client: PoolClient,
+  userId: string,
+  dropId: string,
+  price: string,
+  idempotencyKey: string,
+  configVersionId: string | null = null
+) {
   const { rows } = await client.query(
-    "insert into pack_purchases(user_id,drop_id,price_paid,idempotency_key) values($1,$2,$3,$4) returning *",
-    [userId, dropId, price, idempotencyKey]
+    "insert into pack_purchases(user_id,drop_id,price_paid,idempotency_key,config_version_id) values($1,$2,$3,$4,$5) returning *",
+    [userId, dropId, price, idempotencyKey, configVersionId]
   );
   return rows[0];
 }

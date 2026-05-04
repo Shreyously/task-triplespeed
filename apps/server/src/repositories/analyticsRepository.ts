@@ -50,11 +50,22 @@ export async function getPackEVAnalysis(client: PoolClient) {
     marketValues[row.rarity] = parseFloat(row.avg_value) || 0;
   });
 
-  // Get pack tier configurations
+  // Get active B1 configurations joined with tier metadata
   const dropsResult = await client.query(`
-    SELECT tier, price, cards_per_pack, rarity_weights
-    FROM drops
-    ORDER BY price
+    SELECT
+      d.tier,
+      d.price,
+      d.cards_per_pack,
+      pcv.rarity_weights,
+      pcv.target_margin,
+      pcv.simulated_win_rate,
+      pcv.trigger_reason,
+      pcv.id as config_version_id,
+      pcv.created_at as config_created_at
+    FROM drops d
+    JOIN pack_config_versions pcv
+      ON pcv.tier = d.tier AND pcv.is_active = true
+    ORDER BY d.price
   `);
 
   const packAnalysis = dropsResult.rows.map(drop => {
@@ -78,6 +89,8 @@ export async function getPackEVAnalysis(client: PoolClient) {
     const price = Number(drop.price);
     const margin = price - totalEV;
     const marginPercentage = (margin / price) * 100;
+    const currentMargin = margin / price;
+    const targetMargin = Number(drop.target_margin ?? 0);
 
     return {
       tier: drop.tier,
@@ -86,6 +99,12 @@ export async function getPackEVAnalysis(client: PoolClient) {
       expectedValue: totalEV.toFixed(2),
       margin: margin.toFixed(2),
       marginPercentage: Math.round(marginPercentage * 100) / 100,
+      targetMargin,
+      currentMargin,
+      winRate: Number(drop.simulated_win_rate ?? 0),
+      lastTriggerReason: drop.trigger_reason ?? null,
+      configVersionId: drop.config_version_id ?? null,
+      lastRebalancedAt: drop.config_created_at ?? null,
       rarityBreakdown: breakdown
     };
   });

@@ -149,3 +149,47 @@ create table if not exists portfolio_snapshots (
   total_value numeric(18,2) not null,
   taken_at timestamptz not null default now()
 );
+
+-- ── B1: Pack Economics Algorithm ──────────────────────────────────────────────
+
+do $$
+begin
+  create type config_trigger_reason as enum (
+    'bootstrap_seed',
+    'scheduled',
+    'margin_drift',
+    'manual',
+    'price_anomaly'
+  );
+exception
+  when duplicate_object then null;
+end $$;
+
+-- Versioned rarity weight configurations, scoped per tier (Basic/Pro/Elite).
+-- One active config per tier at any time — enforced by partial unique index.
+create table if not exists pack_config_versions (
+  id                  uuid primary key default gen_random_uuid(),
+  tier                text not null,
+  version             int not null,
+  rarity_weights      jsonb not null,
+  target_margin       numeric(5,4) not null,
+  actual_ev           numeric(18,2) not null,
+  simulated_margin    numeric(5,4) not null,
+  simulated_win_rate  numeric(5,4) not null,
+  market_snapshot     jsonb not null,
+  trigger_reason      config_trigger_reason not null,
+  is_active           boolean not null default false,
+  activated_at        timestamptz,
+  created_at          timestamptz not null default now(),
+  unique (tier, version)
+);
+
+-- DB-enforced: exactly one active config per tier
+create unique index if not exists ux_pack_config_one_active_per_tier
+  on pack_config_versions (tier)
+  where is_active = true;
+
+-- Add audit column to pack_purchases (null = pre-B1 purchase)
+alter table pack_purchases
+  add column if not exists config_version_id uuid references pack_config_versions(id);
+

@@ -28,6 +28,12 @@ export interface PackEVAnalysis {
   expectedValue: string;
   margin: string;
   marginPercentage: number;
+  targetMargin?: number;
+  currentMargin?: number;
+  winRate?: number;
+  lastTriggerReason?: string | null;
+  configVersionId?: string | null;
+  lastRebalancedAt?: string | null;
   rarityBreakdown: Array<{
     rarity: string;
     weight: number;

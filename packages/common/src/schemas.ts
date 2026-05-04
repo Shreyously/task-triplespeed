@@ -36,3 +36,22 @@ export const placeBidSchema = z.object({
   ),
   idempotencyKey: z.string().min(8).optional()
 });
+
+const tierEnum = z.enum(["Basic", "Pro", "Elite"]);
+const rarityWeightsSchema = z.record(z.string(), z.number().min(0).max(1));
+const customWeightsByTierSchema = z.object({
+  Basic: rarityWeightsSchema.optional(),
+  Pro: rarityWeightsSchema.optional(),
+  Elite: rarityWeightsSchema.optional()
+});
+
+export const simulateEconomicsSchema = z.object({
+  tier: tierEnum.optional(),
+  customWeights: customWeightsByTierSchema.optional(),
+  runs: z.number().int().min(100).max(50000).optional()
+});
+
+export const rebalanceEconomicsSchema = z.object({
+  dryRun: z.boolean().optional(),
+  tier: tierEnum.optional()
+});

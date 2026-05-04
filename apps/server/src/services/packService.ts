@@ -8,6 +8,7 @@ import { debitAvailable } from "./balanceService";
 import { getCardPool } from "./pokemonCardService";
 import { priceForRarity } from "./priceEngineService";
 import { emitDropInventory, emitDropPrice, emitDropStatus } from "../realtime/socket";
+import { getActiveConfig } from "../repositories/packConfigRepository";
 
 function weightedPick(weights: Record<string, number>): string {
   const entries = Object.entries(weights);
@@ -62,12 +63,22 @@ export async function buyPack(userId: string, dropId: string, idempotencyKey: st
       if (new Date(drop.ends_at) < now) throw new Error("Drop closed");
       if (drop.inventory <= 0) throw new Error("Sold out");
 
+      // ── B1: Load active rarity weights for this tier ──────────────────────
+      // Weights are tier-scoped (not drop-scoped). Falls back to drop.rarity_weights
+      // if no active config exists yet (backward compatible with pre-migration state).
+      // Cards are generated here, at buy time. revealPack() only reads stored cards.
+      const activeConfig = await getActiveConfig(client, drop.tier);
+      const rarityWeights: Record<string, number> =
+        activeConfig?.rarity_weights ?? drop.rarity_weights ?? { Common: 1 };
+      const configVersionId: string | null = activeConfig?.id ?? null;
+      // ─────────────────────────────────────────────────────────────────────
+
       const price = new Decimal(drop.price);
       await debitAvailable(client, userId, price);
       const invResult = await client.query("update drops set inventory=inventory-1 where id=$1 returning inventory", [dropId]);
-      const purchase = await createPackPurchase(client, userId, dropId, price.toFixed(2), idempotencyKey);
+      const purchase = await createPackPurchase(client, userId, dropId, price.toFixed(2), idempotencyKey, configVersionId);
 
-      const cards = pickCards(Number(drop.cards_per_pack), cardPool, drop.rarity_weights ?? { Common: 1 });
+      const cards = pickCards(Number(drop.cards_per_pack), cardPool, rarityWeights);
       for (const card of cards) {
         const marketValue = priceForRarity(card.rarity).toFixed(2);
         await createCard(client, {
