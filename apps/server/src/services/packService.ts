@@ -9,6 +9,7 @@ import { getCardPool } from "./pokemonCardService";
 import { priceForRarity } from "./priceEngineService";
 import { emitDropInventory, emitDropPrice, emitDropStatus } from "../realtime/socket";
 import { getActiveConfig } from "../repositories/packConfigRepository";
+import { ACCOUNT_LIMITS } from "../config/antibot";
 
 function weightedPick(weights: Record<string, number>): string {
   const entries = Object.entries(weights);
@@ -67,6 +68,21 @@ export async function buyPack(userId: string, dropId: string, idempotencyKey: st
       // Weights are tier-scoped (not drop-scoped). Falls back to drop.rarity_weights
       // if no active config exists yet (backward compatible with pre-migration state).
       // Cards are generated here, at buy time. revealPack() only reads stored cards.
+      await client.query(
+        "select pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+        [userId, dropId]
+      );
+      const packCountResult = await client.query(
+        `select count(*) as count
+         from pack_purchases
+         where user_id = $1 and drop_id = $2`,
+        [userId, dropId]
+      );
+      const packCount = Number(packCountResult.rows[0]?.count ?? 0);
+      if (packCount >= ACCOUNT_LIMITS.maxPacksPerDrop) {
+        throw new Error(`Maximum ${ACCOUNT_LIMITS.maxPacksPerDrop} packs per drop`);
+      }
+
       const activeConfig = await getActiveConfig(client, drop.tier);
       const rarityWeights: Record<string, number> =
         activeConfig?.rarity_weights ?? drop.rarity_weights ?? { Common: 1 };

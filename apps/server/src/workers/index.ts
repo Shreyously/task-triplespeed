@@ -8,6 +8,8 @@ import { rebalanceIfNeeded } from "../services/packEconomicsService";
 import { getAllActiveConfigs } from "../repositories/packConfigRepository";
 import { pool } from "../db/pool";
 import { PACK_ECONOMICS } from "../config/packEconomics";
+import { fairnessQueue } from "../services/fairnessQueueService";
+import { FAIRNESS_CONFIG } from "../config/antibot";
 
 export async function startWorkers() {
   console.log("Starting background workers...");
@@ -71,4 +73,35 @@ export async function startWorkers() {
       console.error("pack economics rebalance worker error", e);
     }
   }, config.rebalanceIntervalMinutes * 60 * 1000);
+
+  setInterval(async () => {
+    try {
+      await monitorFairnessQueues();
+    } catch (e) {
+      console.error("fairness queue monitor error", e);
+    }
+  }, 10000);
+}
+
+async function monitorFairnessQueues() {
+  const dropsResult = await pool.query(
+    `SELECT id, inventory
+     FROM drops
+     WHERE starts_at <= NOW() AND ends_at >= NOW()
+     AND inventory > 0`
+  );
+
+  for (const drop of dropsResult.rows) {
+    const shouldActivate = await fairnessQueue.shouldActivateFairnessMode(drop.id);
+    const queueSize = await fairnessQueue.getQueueSize(drop.id);
+
+    if (shouldActivate && queueSize > 0) {
+      const availableInventory = parseInt(drop.inventory);
+      const winners = await fairnessQueue.processFairnessWindow(drop.id, availableInventory);
+
+      if (winners.length > 0) {
+        console.log(`[FairnessQueue] Processed drop ${drop.id}: ${winners.length} winners from ${queueSize} participants`);
+      }
+    }
+  }
 }

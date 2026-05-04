@@ -10,6 +10,7 @@ import { errorHandler } from "./middleware/error";
 
 export function createApp() {
   const app = express();
+  app.set("trust proxy", false);
   app.use(cors());
   app.use(express.json());
 
