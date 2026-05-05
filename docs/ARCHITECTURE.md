@@ -1,4 +1,4 @@
-# PullVault Architecture (Part A)
+# PullVault Architecture
 
 ## 1) System overview and current operating mode
 
@@ -42,7 +42,7 @@ Plain English:
 | Auction Fee | `7%` | Higher than trade for premium live-liquidity surface |
 | Min Bid Increment | `max($1.00, 5% of current bid)` | Prevents noisy micro-bids, improves discovery |
 | Auction Durations | `60s`, `300s`, `900s` | Supports quick, standard, extended auctions |
-| Anti-Snipe | If bid arrives in final `10s`, extend by `10s`, up to `6` times | Fair response window without infinite extension |
+| Anti-Snipe | If an open bid arrives in final `30s`, extend by `30s`, up to `6` times | Fair response window without infinite extension |
 | Rarity Weights | See table below | Higher tiers allocate more weight to premium rarities |
 
 ### Rarity weights by tier
@@ -188,95 +188,6 @@ Approximate EV per pack from current weights:
 - **Pro (5 cards):** EV/card `~3.31`, EV/pack `~16.57`, Margin vs $15 `~-1.57`
 - **Elite (7 cards):** EV/card `~10.70`, EV/pack `~74.90`, Margin vs $40 `~-34.90`
 
-### B1 Pack Economics Optimization System
-
-**Overview**: The B1 system is a sophisticated rarity weight optimizer that maintains target platform margins while ensuring acceptable user win rates through mathematical optimization and Monte Carlo validation.
-
-**Core Mathematical Algorithm**:
-
-1. **Binary Search Optimization**
-   - Constructs two endpoint weight vectors:
-     - `w_profit`: Max weight on cheapest rarities (maximizes platform margin)
-     - `w_excite`: Max weight on most expensive rarities (maximizes user EV/variance)
-   - Binary search on interpolation parameter `α ∈ [0,1]` to find `α*` where:
-     ```
-     EV(α) = N × Σᵣ w(α)[r] × μᵣ = P × (1 - M)
-     ```
-     Where `N` = cards per pack, `μᵣ` = market average for rarity `r`, `P` = pack price, `M` = target margin
-   - Converges to `<0.0001%` error in 50 iterations
-
-2. **Monte Carlo Validation Engine**
-   - Runs 10,000 simulations per optimization cycle
-   - Uses the full Redis-backed pack pool as the simulation universe, with per-card market values derived from observed card-specific prices when available and stable rarity-based fallback prices otherwise
-   - Computes comprehensive statistics:
-     - Mean/median/stddev pack values
-     - Percentile distribution (p5, p10, p25, p50, p75, p90, p95)
-     - Win rate: fraction where `pack_value >= pack_price`
-     - Projected profit per 1,000/10,000 packs
-     - Rarity hit rates vs. target weights
-
-**Mathematical Constraints and Parameters**:
-
-| Parameter | Value | Mathematical Purpose |
-|---|---|---|
-| `TARGET_MARGIN` | `0.20` (20%) | Platform gross margin target |
-| `WIN_RATE_FLOOR` | `0.25` (25%) | Minimum "winning" pack rate for retention |
-| `MAX_WEIGHT_DELTA` | `±0.08` (±8%) | Prevents whiplash from price volatility |
-| `DRIFT_THRESHOLD` | `0.05` (5%) | Triggers rebalance when margin drifts >5% |
-| `MARGINAL_WIN_RATE_BUFFER` | `0.02` (2%) | Warning buffer above win-rate floor |
-| `MAX_MARGIN_CONCESSION` | `0.05` (5%) | Maximum margin sacrifice for win-rate adjustment |
-| `SIMULATION_RUNS` | `10,000` | Monte Carlo sample size for validation |
-
-**Weight Bounds per Rarity** (min/max to prevent degenerate solutions):
-```
-Common:           [0.15, 0.85]
-Uncommon:         [0.08, 0.50]
-Rare:             [0.02, 0.35]
-Holo Rare:        [0.01, 0.25]
-Ultra Rare/EX/GX: [0.005, 0.15]
-Secret Rare:      [0.002, 0.08]
-```
-
-**Acceptance Rules** (ALL must pass for activation):
-1. **Margin Rule**: `simulated_margin >= target_margin`
-2. **Win-Rate Rule**: `win_rate >= WIN_RATE_FLOOR`
-3. **Bounds Rule**: All weights within `[min, max]` per rarity
-4. **Delta Cap Rule**: `|new_weight - current_weight| <= MAX_WEIGHT_DELTA`
-5. **Normalization Rule**: `Σ weights = 1.0 ± 0.001`
-
-**Feasibility Classification**:
-- **FEASIBLE**: Passes all acceptance rules with healthy buffer
-- **MARGINAL**: Passes but within 2% of win-rate floor (monitor closely)
-- **INFEASIBLE**: Fails acceptance rules (rejected, current config kept active)
-
-**Win-Rate Adjustment Algorithm**:
-When Monte Carlo shows `win_rate < WIN_RATE_FLOOR`:
-1. Increment `α` by `WIN_RATE_ALPHA_BUMP` (0.02)
-2. Recompute weights and validate margin concession (max 5% below target)
-3. Re-run Monte Carlo validation
-4. Repeat until win-rate satisfied or margin concession exceeded
-5. If still infeasible → reject candidate, keep current config
-
-**Drift Detection and Rebalancing**:
-- Background worker checks each tier's `active_margin` against live prices every 15 minutes
-- Computes: `drift = |current_active_margin - target_margin|`
-- Triggers rebalance when: `drift > DRIFT_THRESHOLD`
-- Manual triggers: bootstrap, price anomalies, administrative requests
-
-**Version Control System**:
-- Each optimization creates versioned config with:
-  - Rarity weights and market snapshot
-  - Analytical EV and simulated metrics
-  - Trigger reason and timestamp
-- Only one config active per tier (enforced by database constraint)
-- Complete audit trail for debugging and rollback
-
-**Mathematic Properties**:
-- **Monotonicity**: EV increases monotonically with α (enables binary search)
-- **Convexity**: Weight space is convex (linear interpolation between valid vectors)
-- **Convergence**: Binary search guaranteed to find α* satisfying EV constraint
-- **Robustness**: Delta cap prevents large jumps, Monte Carlo catches edge cases
-
 ### Interpretation
 
 Current parameters intentionally favor excitement in higher tiers, but make top-tier pack EV economically aggressive (negative gross pack margin under midpoint assumptions). In Part A this is acceptable for engagement-first simulation, but **not long-term sustainable without rebalancing**.
@@ -286,7 +197,7 @@ Monetization currently comes from:
 - Trade fee `5%`
 - Auction fee `7%`
 
-**Current Status**: The B1 optimization system now automatically maintains target margins while preserving user experience. The system continuously monitors market conditions and rebalances rarity weights when margins drift beyond 5% threshold.
+Planned Part B lever: tune tier prices and/or rarity weights dynamically to hit target blended margin while preserving "occasional win" feel.
 
 Plain English:
 - Right now, higher tiers are very generous to players on average.
@@ -365,7 +276,7 @@ Considered, but row-level DB locks already provide stronger correctness with low
 Considered for audit extensibility, deferred in favor of simpler ACID transaction flows to reduce implementation risk in trial timebox.
 
 4. **Dynamic pricing/odds rebalancer**  
-**IMPLEMENTED**: The B1 pack economics optimization system now provides automated rebalancing with Monte Carlo validation, drift detection, and version-controlled configurations.
+Considered for economics optimization, deferred to Part B where EV tuning and abuse resistance are explicitly tested.
 
 ---
 
@@ -388,7 +299,169 @@ Documented above with code-accurate weights/prices; current model intentionally 
 
 ---
 
-## 9) Part B2 hardening design
+## 9) Part B: Platform Hardening
+
+Part B builds on the Part A transaction-safe foundation with production hardening around economics, abuse resistance, auction integrity, public fairness proofs, and admin health monitoring. These systems are documented separately from the Part A baseline so the original architecture remains readable and each hardening feature has a clear owner and evaluation surface.
+
+---
+
+## 10) B1 - Pack economics algorithm
+
+### Before B1: static pack economics
+
+The first economics model used fixed tier odds and rarity value ranges:
+- Basic, Pro, and Elite had hard-coded rarity weights on `drops`.
+- Card values came from rarity ranges plus simulated market drift.
+- EV was calculated after the fact from average card values by rarity.
+- Admins could change drop prices and windows, but rarity weights did not automatically respond to market movement.
+
+That model was useful for proving pack purchase, reveal, balance, and portfolio flows. It did not guarantee independent profitability per tier when card prices moved, and high-variance tiers could become negative-EV for the platform without an automatic correction.
+
+### Current B1: versioned rarity-weight optimizer
+
+B1 now treats each tier's rarity weights as an active economic config in `pack_config_versions`. Pack purchase reads the active config for the tier inside the purchase transaction and stores `config_version_id` on `pack_purchases`. That means purchased packs are tied to the weights active at purchase time; later rebalances affect future purchases, not already-created pack openings.
+
+Default economic targets:
+- `TARGET_MARGIN = 0.20`: each tier targets 20% gross margin, so target EV is 80% of pack price.
+- `WIN_RATE_FLOOR = 0.25`: Pro and Elite target at least one winning pack in four, where a win means `pack_value >= pack_price`.
+- Basic uses a tier-specific `0.15` win-rate floor because a $5, 3-card pack has less room to maintain both 20% margin and frequent wins.
+
+Expected value math:
+```
+EV_tier = cards_per_pack * sum(weight_r * avg_market_value_r)
+target_EV = pack_price * (1 - target_margin)
+margin = (pack_price - EV_tier) / pack_price
+win_rate = simulated_count(pack_value >= pack_price) / simulation_runs
+```
+
+Market values come from the full Pokemon card pool, not only already-opened cards. For each pool card, the engine uses observed average `cards.market_value` when available; otherwise it uses a stable rarity-based fallback estimate. Rarity averages are computed from that full pool snapshot.
+
+Current optimization flow:
+1. Load active drop price, cards per pack, active config, and pool market averages.
+2. Build `w_profit` by greedily placing as much weight as allowed on the cheapest rarities.
+3. Build `w_excite` by greedily placing as much weight as allowed on the most expensive rarities.
+4. Binary search an interpolation value `alpha` for 50 iterations:
+   ```
+   w(alpha) = (1 - alpha) * w_profit + alpha * w_excite
+   ```
+5. Select the highest-excitement weight vector whose analytical EV stays at the 20% target margin.
+6. Project weights back into the bounded simplex so they sum to 1 and respect rarity min/max bounds.
+7. Apply the per-rebalance delta cap against the currently active config.
+8. Run Monte Carlo validation with 10,000 pack openings.
+9. If win rate is too low, bump `alpha` by `0.02` steps, accepting up to a 5 percentage-point margin concession during the search, then rerun full validation.
+10. Activate a new config only if acceptance rules pass; otherwise keep the current config.
+
+Constraint rules:
+- every rarity has configured min/max bounds, so the optimizer cannot make packs 99% commons or remove chase-card odds entirely
+- shared rarities can move by at most `MAX_WEIGHT_DELTA = 0.08` per rebalance cycle
+- weight totals must equal `1.0 +/- 0.001`
+- candidates must satisfy tier margin and tier win-rate floors in simulation before activation
+
+Simulation and admin endpoints:
+- `POST /analytics/simulate`: admin-only Monte Carlo simulation, default 10,000 runs, max 50,000, optional tier and custom weights
+- `POST /analytics/rebalance`: manual rebalance, with optional `dryRun`
+- `GET /analytics/drift`: current margin drift by tier
+- `GET /analytics/config-history/:tier`: version history and market snapshots
+
+Automatic rebalancing:
+- The worker runs `rebalanceIfNeeded("scheduled")` every `REBALANCE_INTERVAL_MINUTES`.
+- Drift is `abs(active_margin - target_margin)`.
+- A tier rebalances when drift exceeds `DRIFT_THRESHOLD = 0.05`.
+- If a single card spikes or crashes, the affected rarity's average and simulation distribution shift; bounds plus the delta cap prevent violent one-cycle changes.
+- If the pool is too small or structurally infeasible, the optimizer rejects the candidate and leaves the current active config in place.
+
+### Implementation detail summary
+
+**Overview**: The B1 system is a sophisticated rarity weight optimizer that maintains target platform margins while ensuring acceptable user win rates through mathematical optimization and Monte Carlo validation.
+
+**Core Mathematical Algorithm**:
+
+1. **Binary Search Optimization**
+   - Constructs two endpoint weight vectors:
+     - `w_profit`: Max weight on cheapest rarities (maximizes platform margin)
+     - `w_excite`: Max weight on most expensive rarities (maximizes user EV/variance)
+   - Binary search on interpolation parameter `α ∈ [0,1]` to find `α*` where:
+     ```
+     EV(α) = N × Σᵣ w(α)[r] × μᵣ = P × (1 - M)
+     ```
+     Where `N` = cards per pack, `μᵣ` = market average for rarity `r`, `P` = pack price, `M` = target margin
+   - Converges to `<0.0001%` error in 50 iterations
+
+2. **Monte Carlo Validation Engine**
+   - Runs 10,000 simulations per optimization cycle
+   - Uses the full Redis-backed pack pool as the simulation universe, with per-card market values derived from observed card-specific prices when available and stable rarity-based fallback prices otherwise
+   - Computes comprehensive statistics:
+     - Mean/median/stddev pack values
+     - Percentile distribution (p5, p10, p25, p50, p75, p90, p95)
+     - Win rate: fraction where `pack_value >= pack_price`
+     - Projected profit per 1,000/10,000 packs
+     - Rarity hit rates vs. target weights
+
+**Mathematical Constraints and Parameters**:
+
+| Parameter | Value | Mathematical Purpose |
+|---|---|---|
+| `TARGET_MARGIN` | `0.20` (20%) | Platform gross margin target |
+| `WIN_RATE_FLOOR` | `0.25` default; Basic `0.15` | Minimum "winning" pack rate for retention |
+| `MAX_WEIGHT_DELTA` | `±0.08` (±8%) | Prevents whiplash from price volatility |
+| `DRIFT_THRESHOLD` | `0.05` (5%) | Triggers rebalance when margin drifts >5% |
+| `MARGINAL_WIN_RATE_BUFFER` | `0.02` (2%) | Warning buffer above win-rate floor |
+| `MAX_MARGIN_CONCESSION` | `0.05` (5%) | Maximum margin sacrifice for win-rate adjustment |
+| `SIMULATION_RUNS` | `10,000` | Monte Carlo sample size for validation |
+
+**Weight Bounds per Rarity** (min/max to prevent degenerate solutions):
+```
+Common:           [0.15, 0.85]
+Uncommon:         [0.08, 0.50]
+Rare:             [0.02, 0.35]
+Holo Rare:        [0.01, 0.25]
+Ultra Rare/EX/GX: [0.005, 0.15]
+Secret Rare:      [0.002, 0.08]
+```
+
+**Acceptance Rules** (ALL must pass for activation):
+1. **Margin Rule**: `simulated_margin >= target_margin`
+2. **Win-Rate Rule**: `win_rate >= WIN_RATE_FLOOR`
+3. **Bounds Rule**: All weights within `[min, max]` per rarity
+4. **Delta Cap Rule**: `|new_weight - current_weight| <= MAX_WEIGHT_DELTA`
+5. **Normalization Rule**: `Σ weights = 1.0 ± 0.001`
+
+**Feasibility Classification**:
+- **FEASIBLE**: Passes all acceptance rules with healthy buffer
+- **MARGINAL**: Passes but within 2% of win-rate floor (monitor closely)
+- **INFEASIBLE**: Fails acceptance rules (rejected, current config kept active)
+
+**Win-Rate Adjustment Algorithm**:
+When Monte Carlo shows `win_rate < WIN_RATE_FLOOR`:
+1. Increment `α` by `WIN_RATE_ALPHA_BUMP` (0.02)
+2. Recompute weights and validate margin concession (max 5% below target)
+3. Re-run Monte Carlo validation
+4. Repeat until win-rate satisfied or margin concession exceeded
+5. If still infeasible → reject candidate, keep current config
+
+**Drift Detection and Rebalancing**:
+- Background worker checks each tier's `active_margin` against live prices every `REBALANCE_INTERVAL_MINUTES`
+- Computes: `drift = |current_active_margin - target_margin|`
+- Triggers rebalance when: `drift > DRIFT_THRESHOLD`
+- Manual triggers: bootstrap, price anomalies, administrative requests
+
+**Version Control System**:
+- Each optimization creates versioned config with:
+  - Rarity weights and market snapshot
+  - Analytical EV and simulated metrics
+  - Trigger reason and timestamp
+- Only one config active per tier (enforced by database constraint)
+- Complete audit trail for debugging and rollback
+
+**Mathematic Properties**:
+- **Monotonicity**: EV increases monotonically with α (enables binary search)
+- **Convexity**: Weight space is convex (linear interpolation between valid vectors)
+- **Convergence**: Binary search guaranteed to find α* satisfying EV constraint
+- **Robustness**: Delta cap prevents large jumps, Monte Carlo catches edge cases
+
+---
+
+## 11) B2 - Anti-bot and fairness hardening
 
 ### Redis-first atomic sliding windows
 
@@ -475,7 +548,91 @@ B2 emits structured logs around:
 
 ---
 
-## 10) Part B4 provably fair pack openings
+## 12) B3 - Auction integrity
+
+B3 adds an integrity layer on top of the Part A auction transaction model. The database remains the source of truth, but the bidding flow now changes state near the end of an auction and records post-settlement review signals for admins.
+
+### Sniping prevention beyond anti-snipe timers
+
+Auctions now use a sealed-bid endgame:
+- Normal auctions start in `LIVE` or `CLOSING` open ascending-bid mode.
+- When an auction is within `SEALED_BID_WINDOW_SECONDS` (`30s`) of `end_time`, reads and bids promote it to `SEALED_ENDGAME`.
+- Socket.io emits `auction:sealed:status` so existing auction rooms can switch UI mode without a page reload.
+- During `SEALED_ENDGAME`, bidders submit or replace a hidden max bid in `sealed_bids`; the public `current_bid` and open bid history no longer reveal the new max bids.
+- Funds are held for each bidder's current hidden max. Replacing a sealed bid atomically holds only the delta or releases the reduction.
+- Settlement computes a second-price result from sealed candidates plus the current open leader. The winner pays the runner-up max plus the normal increment, capped by their own max.
+
+Why this prevents endgame leakage:
+- Bots cannot observe the true final willingness-to-pay of competitors during the last 30 seconds.
+- Last-millisecond timing is less valuable because the final clearing price comes from hidden maximums, not the last visible bid.
+- The open leader is included as a sealed candidate at the visible current bid, so the transition composes with existing open-bid state.
+
+### Bid validation hardening
+
+The bid path enforces several rules inside the auction transaction:
+- **Minimum increment:** next bid must be at least `max($1.00, 5% of current bid)` above the current bid.
+- **Self-bidding:** the seller cannot bid on their own auction.
+- **Fat-finger confirmation:** a bid requires explicit confirmation when it is both at least `2x` the current-bid reference and at least `3x` card market value. If no market value exists, the current-bid multiple alone is used.
+- **Open-bid pacing:** Redis enforces a `1500ms` per-user cooldown per auction plus a sliding window of at most `5` open bids per `10s`.
+- **Sealed-bid update pacing:** Redis enforces a `1000ms` per-user sealed max update cooldown.
+- **Idempotency:** open and sealed bid tables each deduplicate by `(bidder_id, idempotency_key)`.
+- **Held funds:** bid holds and releases are done before state changes commit, preventing users from overcommitting across auctions.
+
+### Wash-trade and collusion review flags
+
+Flagging happens during settlement via `runIntegrityReview`; flagged auctions are inserted into `auction_integrity_flags` with `status='OPEN'` and are not auto-cancelled.
+
+Current heuristics:
+- `REPEATED_SELLER_WINNER_PAIR`, severity `3`: same seller/winner pair has at least `3` settlements in the last `30 days`.
+- `LOW_CLOSE_WITHOUT_COMPETITION`, severity `2`: final price is below `65%` of market value and there was at most one distinct bidder.
+- `SEALED_ENDGAME_LOW_COMPETITION`, severity `1`: auction reached sealed endgame but had two or fewer bidders.
+- `MICRO_BID_LADDER`, severity `1`: one bidder placed at least `8` visible bids in the auction.
+
+These are intentionally review heuristics rather than hard enforcement. The goal is to catch obvious collusion and suspicious low-competition outcomes while leaving legitimate repeat buyers, niche-card auctions, and normal single-bid outcomes available for admin judgment.
+
+### Auction analytics
+
+Admin analytics include auction integrity health in `GET /analytics/dashboard`:
+- participation rate: percent of auctions whose visible `current_bid` is above zero
+- average bidders per auction, counting both open and sealed bidders
+- sealed endgame rate
+- low-close rate against market value
+- flag rate and total review flags
+- snipe rate, measured by auctions with anti-snipe extensions
+- recent flagged auction summaries with seller, winner, final price, market value, bidder count, severity, and details
+
+The admin analytics page consumes these dashboard fields, and core auction actions emit `analytics:dashboard:invalidated` so the dashboard can refresh after auction creation, open bids, sealed bids, and settlement.
+
+### WebSocket and UI composition
+
+The existing room flow remains intact:
+- Clients join `auction:<id>` through `join:auction`.
+- Open bids continue to emit `auction:updated` and `auction:bid:history`.
+- Sealed-state transitions emit `auction:sealed:status`.
+- Settlement emits `auction:closed` with `winning_max_bid` and `final_clearing_price`.
+- The web auction page renders `SEALED_ENDGAME`, labels the visible price as a floor, hides competitors' sealed max bids, shows the user's own sealed max, and displays second-price settlement details after close.
+
+### Persistence
+
+B3 uses these persisted fields and tables:
+- `auctions.status` includes `SEALED_ENDGAME`.
+- `auctions.sealed_phase_started_at`, `sealed_phase_ends_at`, `sealed_bid_floor`, `winning_max_bid`, and `final_clearing_price` record lifecycle and settlement pricing.
+- `sealed_bids` stores one hidden max per `(auction_id, bidder_id)` plus idempotency.
+- `auction_settlements` stores winner, gross amount, winning max, final clearing price, fee, and idempotency.
+- `auction_integrity_flags` stores review flags, severity, JSON details, status, and created time.
+
+### Test coverage
+
+`apps/server/test/auctionIntegrity.test.ts` covers:
+- snapshot promotion into sealed endgame near the threshold
+- second-price sealed settlement
+- sealed bid replacement and held-fund adjustment
+- seller self-bid rejection
+- rapid open-bid pacing rejection
+
+---
+
+## 13) B4 - Provably fair pack openings
 
 PullVault now supports a commit-reveal pack opening proof built on SHA-256 and HMAC-SHA256.
 
@@ -493,6 +650,8 @@ Deterministic opening generation:
 Reveal and verification:
 - Reveal/public proof exposes `server_seed`, `server_seed_hash`, `client_seed`, rarity micros, card pool snapshot/hash, and selected card hash.
 - Browser verification recomputes hash and full derived card list locally, without trusting server-side verdict APIs.
+- If server_seed is altered after commitment, the recomputed SHA256(server_seed) will not match the stored server_seed_hash returned to the user at purchase time, and browser verification will report a failed hash check, invalidating the result.
+- The verification process does not short-circuit on hash failure. By running the full derivation even after a hash mismatch, the system provides a stronger audit trail that confirms both the seed was tampered with and that the resulting cards differ from the original committed result.
 
 Public audit log:
 - Every opening appends a tamper-evident event (`event_hash`, `previous_event_hash`) to `pack_opening_audit_events`.
@@ -507,7 +666,7 @@ These logs are intentionally shaped so a later metrics pipeline or dashboard can
 
 ---
 
-## 11) Part B5 platform health dashboard
+## 14) B5 - Platform health dashboard
 
 The admin dashboard now extends beyond economics and reports four operational areas on `GET /analytics/dashboard`:
 
