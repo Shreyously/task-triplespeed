@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { API_BASE } from "../../../lib/config";
+import Link from "next/link";
 
 type Card = { id: string; name: string; set_name: string; rarity: string; image_url: string; market_value: string };
 const RECENT_UNOPENED_PACK_IDS_KEY = "recent-unopened-pack-ids";
@@ -64,6 +65,9 @@ export default function RevealPage({ params }: { params: { purchaseId: string } 
             <div className="card reveal-summary-enter">
               <p>Total pack value: ${totalValue}</p>
               <p className={Number(pnl) >= 0 ? "text-emerald-400" : "text-rose-400"}>P/L: ${pnl}</p>
+              <Link className="touch-btn mt-3 inline-flex bg-slate-200 text-slate-900" href={`/verify?purchaseId=${params.purchaseId}`}>
+                Verify This Opening
+              </Link>
             </div>
           )}
         </>

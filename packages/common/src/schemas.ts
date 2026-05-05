@@ -9,6 +9,8 @@ export const loginSchema = signupSchema;
 
 export const buyPackSchema = z.object({
   dropId: z.string().uuid(),
+  commitmentId: z.string().uuid().optional(),
+  clientSeed: z.string().min(16).max(256).optional(),
   idempotencyKey: z.string().min(8).optional()
 });
 

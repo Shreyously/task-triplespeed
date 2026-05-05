@@ -1,4 +1,5 @@
 import Decimal from "decimal.js";
+import { randomUUID } from "crypto";
 import { pool, withTx } from "../db/pool";
 import { getDropForUpdate, listDrops, updateDrop } from "../repositories/dropRepository";
 import { createPackPurchase, getPurchaseById, getPurchaseByIdempotencyKey } from "../repositories/packRepository";
@@ -6,35 +7,23 @@ import { createCard, getCardsByPurchase } from "../repositories/cardRepository";
 import { createLedger } from "../repositories/ledgerRepository";
 import { debitAvailable } from "./balanceService";
 import { getCardPool } from "./pokemonCardService";
-import { priceForRarity } from "./priceEngineService";
 import { emitDropInventory, emitDropPrice, emitDropStatus } from "../realtime/socket";
 import { getActiveConfig } from "../repositories/packConfigRepository";
 import { ACCOUNT_LIMITS } from "../config/antibot";
-
-function weightedPick(weights: Record<string, number>): string {
-  const entries = Object.entries(weights);
-  const total = entries.reduce((acc, [, weight]) => acc + Number(weight), 0);
-  let roll = Math.random() * total;
-  for (const [rarity, weight] of entries) {
-    roll -= Number(weight);
-    if (roll <= 0) return rarity;
-  }
-  return entries[entries.length - 1]?.[0] ?? "Common";
-}
-
-function pickCards(count: number, pool: Array<{ name: string; setName: string; rarity: string; imageUrl: string }>, rarityWeights: Record<string, number>) {
-  const byRarity = pool.reduce<Record<string, Array<{ name: string; setName: string; rarity: string; imageUrl: string }>>>((acc, card) => {
-    const key = card.rarity || "Common";
-    if (!acc[key]) acc[key] = [];
-    acc[key].push(card);
-    return acc;
-  }, {});
-  return Array.from({ length: count }, () => {
-    const desired = weightedPick(rarityWeights);
-    const candidates = byRarity[desired] ?? byRarity.Common ?? pool;
-    return candidates[Math.floor(Math.random() * candidates.length)];
-  });
-}
+import {
+  consumeCommitment,
+  createOpeningFairnessRecord,
+  getCommitmentForUpdate,
+  getOpeningFairnessByPurchaseId,
+  markCommitmentRevealed
+} from "../repositories/provablyFairRepository";
+import {
+  appendOpeningAuditEvent,
+  buildPublicOpeningProof,
+  deriveOpeningCards,
+  prepareProvablyFairInputs,
+  reserveFairnessCommitment
+} from "./provablyFairService";
 
 export async function getDrops() {
   const client = await pool.connect();
@@ -45,7 +34,13 @@ export async function getDrops() {
   }
 }
 
-export async function buyPack(userId: string, dropId: string, idempotencyKey: string) {
+export async function buyPack(
+  userId: string,
+  dropId: string,
+  idempotencyKey: string,
+  commitmentId?: string,
+  clientSeed?: string
+) {
   const cardPool = await getCardPool();
   if (!cardPool.length) throw new Error("Card pool unavailable");
   try {
@@ -64,10 +59,6 @@ export async function buyPack(userId: string, dropId: string, idempotencyKey: st
       if (new Date(drop.ends_at) < now) throw new Error("Drop closed");
       if (drop.inventory <= 0) throw new Error("Sold out");
 
-      // ── B1: Load active rarity weights for this tier ──────────────────────
-      // Weights are tier-scoped (not drop-scoped). Falls back to drop.rarity_weights
-      // if no active config exists yet (backward compatible with pre-migration state).
-      // Cards are generated here, at buy time. revealPack() only reads stored cards.
       await client.query(
         "select pg_advisory_xact_lock(hashtext($1), hashtext($2))",
         [userId, dropId]
@@ -87,16 +78,38 @@ export async function buyPack(userId: string, dropId: string, idempotencyKey: st
       const rarityWeights: Record<string, number> =
         activeConfig?.rarity_weights ?? drop.rarity_weights ?? { Common: 1 };
       const configVersionId: string | null = activeConfig?.id ?? null;
-      // ─────────────────────────────────────────────────────────────────────
+
+      const resolvedCommitmentId = commitmentId
+        ?? (await reserveFairnessCommitment(client, userId)).commitmentId;
+      const resolvedClientSeed = clientSeed ?? `${randomUUID()}-${Date.now()}`;
+
+      const commitment = await getCommitmentForUpdate(client, resolvedCommitmentId);
+      if (!commitment) throw new Error("Fairness commitment not found");
+      if (commitment.reserved_by !== userId) throw new Error("Fairness commitment belongs to another user");
+      if (commitment.status !== "RESERVED") throw new Error("Fairness commitment already used");
+      if (new Date(commitment.expires_at) <= new Date()) throw new Error("Fairness commitment expired");
+
+      const { normalizedPool, poolHash, rarityWeightMicros } = await prepareProvablyFairInputs(client, cardPool, rarityWeights);
 
       const price = new Decimal(drop.price);
       await debitAvailable(client, userId, price);
       const invResult = await client.query("update drops set inventory=inventory-1 where id=$1 returning inventory", [dropId]);
       const purchase = await createPackPurchase(client, userId, dropId, price.toFixed(2), idempotencyKey, configVersionId);
 
-      const cards = pickCards(Number(drop.cards_per_pack), cardPool, rarityWeights);
+      const { cards, cardsHash } = await deriveOpeningCards({
+        serverSeed: commitment.server_seed,
+        purchaseId: purchase.id,
+        dropId,
+        configVersionId,
+        clientSeed: resolvedClientSeed,
+        nonce: 0,
+        cardsPerPack: Number(drop.cards_per_pack),
+        rarityWeightMicros,
+        cardPool: normalizedPool
+      });
+
       for (const card of cards) {
-        const marketValue = priceForRarity(card.rarity).toFixed(2);
+        const marketValue = card.acquisitionValue;
         await createCard(client, {
           purchaseId: purchase.id,
           ownerId: userId,
@@ -108,6 +121,34 @@ export async function buyPack(userId: string, dropId: string, idempotencyKey: st
           acquisitionValue: marketValue
         });
       }
+
+      await createOpeningFairnessRecord(client, {
+        purchaseId: purchase.id,
+        commitmentId: commitment.id,
+        serverSeedHash: commitment.server_seed_hash,
+        clientSeed: resolvedClientSeed,
+        nonce: 0,
+        dropId,
+        configVersionId,
+        rarityWeightMicros,
+        cardPoolHash: poolHash,
+        cardsPerPack: Number(drop.cards_per_pack),
+        selectedCardsHash: cardsHash
+      });
+
+      await consumeCommitment(client, commitment.id, purchase.id, resolvedClientSeed);
+      await appendOpeningAuditEvent(client, purchase.id, {
+        purchaseId: purchase.id,
+        dropId,
+        configVersionId,
+        serverSeedHash: commitment.server_seed_hash,
+        clientSeed: resolvedClientSeed,
+        rarityWeightMicros,
+        cardsPerPack: Number(drop.cards_per_pack),
+        drawnRarities: cards.map((c) => c.rarity),
+        cardPoolHash: poolHash,
+        selectedCardsHash: cardsHash
+      });
 
       await createLedger(client, userId, "PACK_PURCHASE", price.negated().toFixed(2), purchase.id);
       return { purchase, remainingInventory: Number(invResult.rows[0].inventory) };
@@ -145,11 +186,19 @@ export async function revealPack(userId: string, purchaseId: string) {
     });
     const totalValue = cards.reduce((acc: Decimal, c: Record<string, string>) => acc.plus(c.market_value), new Decimal(0));
     const paid = new Decimal(purchase.price_paid);
+
+    const fairness = await getOpeningFairnessByPurchaseId(client, purchaseId);
+    if (fairness) {
+      await markCommitmentRevealed(client, fairness.commitment_id);
+    }
+    const fairnessProof = await buildPublicOpeningProof(client, purchaseId);
+
     return {
       purchase,
       cards: revealOrder,
       totalValue: totalValue.toFixed(2),
-      pnl: totalValue.minus(paid).toFixed(2)
+      pnl: totalValue.minus(paid).toFixed(2),
+      fairnessProof
     };
   } finally {
     client.release();
@@ -187,12 +236,12 @@ export async function syncDrops() {
         emitDropStatus(drop.id, currentStarts.toISOString(), currentEnds.toISOString());
       }
     }
-    
-    dropCache.set(drop.id, { 
-      price: currentPrice, 
+
+    dropCache.set(drop.id, {
+      price: currentPrice,
       inventory: currentInventory,
-      starts_at: currentStarts, 
-      ends_at: currentEnds 
+      starts_at: currentStarts,
+      ends_at: currentEnds
     });
   }
 }

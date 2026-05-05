@@ -88,6 +88,17 @@ export default function HomePage() {
     setBuyingDropId(dropId);
     const token = localStorage.getItem("token") || "";
     const idem = uuid();
+    const reserveResp = await fetch(`${API_BASE}/provably-fair/commitments/reserve`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` }
+    });
+    const reserveData = await reserveResp.json();
+    if (!reserveResp.ok) {
+      setMsg(reserveData.error ?? "Failed to reserve fairness commitment");
+      setBuyingDropId("");
+      return;
+    }
+    const clientSeed = `${crypto.randomUUID()}-${Date.now()}`;
     const r = await fetch(`${API_BASE}/packs/buy`, {
       method: "POST",
       headers: {
@@ -95,11 +106,16 @@ export default function HomePage() {
         authorization: `Bearer ${token}`,
         "idempotency-key": idem
       },
-      body: JSON.stringify({ dropId, idempotencyKey: idem })
+      body: JSON.stringify({
+        dropId,
+        idempotencyKey: idem,
+        commitmentId: reserveData.commitmentId,
+        clientSeed
+      })
     });
     const data = await r.json();
     if (r.ok) {
-      setMsg(`Bought pack ${data.purchase.id}`);
+      setMsg(`Bought pack ${data.purchase.id} | Seed hash: ${reserveData.serverSeedHash}`);
       addUnopenedPack(data.purchase.id);
       setBuyingDropId("");
       return;
@@ -145,6 +161,10 @@ export default function HomePage() {
   return (
     <div className="page-stack">
       <h1 className="fluid-title">Pack Drops</h1>
+      <div className="flex flex-wrap gap-2">
+        <Link className="touch-btn bg-slate-200 text-slate-900" href="/verify">Verify Pack</Link>
+        <Link className="touch-btn bg-slate-200 text-slate-900" href="/audit">Public Audit</Link>
+      </div>
       {msg && <p className="safe-break text-sm sm:text-base">{msg}</p>}
       {recentUnopenedPackIds.length > 0 && (
         <div className="card space-y-3">

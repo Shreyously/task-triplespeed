@@ -473,4 +473,34 @@ B2 emits structured logs around:
 - fairness participant and winner counts
 - bot blocking and suspicious activity flags
 
+---
+
+## 10) Part B4 provably fair pack openings
+
+PullVault now supports a commit-reveal pack opening proof built on SHA-256 and HMAC-SHA256.
+
+Commit at purchase preparation time:
+- Server creates `server_seed` (32 random bytes, hex).
+- Server stores `server_seed_hash = SHA256(server_seed)` and returns only hash + commitment ID.
+- User provides `client_seed` when buying.
+
+Deterministic opening generation:
+- Pack cards are generated at purchase time from HMAC draws keyed by `server_seed`.
+- Inputs are canonicalized and include `purchaseId`, `dropId`, `configVersionId`, `clientSeed`, `nonce`, `slot`, and `cardPoolHash`.
+- Rarity draws use integer micros (`sum = 1_000_000`) to avoid float drift.
+- Card selection and initial acquisition value are deterministic from the same seed chain.
+
+Reveal and verification:
+- Reveal/public proof exposes `server_seed`, `server_seed_hash`, `client_seed`, rarity micros, card pool snapshot/hash, and selected card hash.
+- Browser verification recomputes hash and full derived card list locally, without trusting server-side verdict APIs.
+
+Public audit log:
+- Every opening appends a tamper-evident event (`event_hash`, `previous_event_hash`) to `pack_opening_audit_events`.
+- Public audit page can verify chain continuity and aggregate rarity configuration usage.
+
+Indexes introduced for B4:
+- `pack_fairness_commitments`: unique `server_seed_hash`, unique `purchase_id`, plus `(reserved_by,status,expires_at)` and `(status,expires_at)` for reservation lookup/expiry cleanup.
+- `pack_opening_fairness`: PK `purchase_id`, unique `commitment_id`, plus `(created_at)`, `(drop_id,created_at)`, `(config_version_id,created_at)` for proof lookup and distribution analysis.
+- `pack_opening_audit_events`: unique `event_hash`, `(created_at,id)` for pagination, `(purchase_id)` for drill-down.
+
 These logs are intentionally shaped so a later metrics pipeline or dashboard can consume them without changing the core enforcement flow again.

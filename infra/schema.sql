@@ -223,3 +223,69 @@ create unique index if not exists ux_pack_config_one_active_per_tier
 alter table pack_purchases
   add column if not exists config_version_id uuid references pack_config_versions(id);
 
+create table if not exists pack_fairness_commitments (
+  id uuid primary key default gen_random_uuid(),
+  server_seed text not null,
+  server_seed_hash text not null unique,
+  status text not null check (status in ('RESERVED','CONSUMED','REVEALED','EXPIRED')),
+  reserved_by uuid references users(id),
+  reserved_at timestamptz not null default now(),
+  consumed_at timestamptz,
+  revealed_at timestamptz,
+  purchase_id uuid unique references pack_purchases(id),
+  client_seed text,
+  expires_at timestamptz not null default (now() + interval '15 minutes')
+);
+
+create index if not exists ix_pack_fairness_commitments_reserved_by_status_expires
+  on pack_fairness_commitments (reserved_by, status, expires_at);
+
+create index if not exists ix_pack_fairness_commitments_status_expires
+  on pack_fairness_commitments (status, expires_at);
+
+create table if not exists pack_card_pool_snapshots (
+  hash text primary key,
+  snapshot jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists pack_opening_fairness (
+  purchase_id uuid primary key references pack_purchases(id),
+  commitment_id uuid not null unique references pack_fairness_commitments(id),
+  scheme_version text not null default 'pf-pack-v1',
+  server_seed_hash text not null,
+  client_seed text not null,
+  nonce int not null default 0,
+  drop_id uuid not null references drops(id),
+  config_version_id uuid references pack_config_versions(id),
+  rarity_weight_micros jsonb not null,
+  card_pool_hash text not null,
+  cards_per_pack int not null,
+  selected_cards_hash text not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists ix_pack_opening_fairness_created_at
+  on pack_opening_fairness (created_at);
+
+create index if not exists ix_pack_opening_fairness_drop_created
+  on pack_opening_fairness (drop_id, created_at);
+
+create index if not exists ix_pack_opening_fairness_config_created
+  on pack_opening_fairness (config_version_id, created_at);
+
+create table if not exists pack_opening_audit_events (
+  id bigserial primary key,
+  purchase_id uuid not null references pack_purchases(id),
+  created_at timestamptz not null default now(),
+  event_hash text not null unique,
+  previous_event_hash text,
+  payload jsonb not null
+);
+
+create index if not exists ix_pack_opening_audit_events_created_id
+  on pack_opening_audit_events (created_at, id);
+
+create index if not exists ix_pack_opening_audit_events_purchase_id
+  on pack_opening_audit_events (purchase_id);
+

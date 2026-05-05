@@ -31,6 +31,8 @@ export function Navbar() {
 
   const navLinks = [
     { href: "/", label: "Packs" },
+    { href: "/verify", label: "Verify Fairness" },
+    { href: "/audit", label: "Public Audit" },
     { href: "/collection", label: "Collection" },
     { href: "/marketplace", label: "Marketplace" },
     { href: "/auctions", label: "Auctions" },
