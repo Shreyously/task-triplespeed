@@ -72,9 +72,13 @@ function minimumBidFor(current: Decimal): Decimal {
   return current.eq(0) ? new Decimal(1) : current.plus(minIncrement(current));
 }
 
-function isSealedWindow(auction: { status: string; end_time: Date | string }, now: Date) {
+function isSealedWindow(auction: { status: string; start_time: Date | string; end_time: Date | string; anti_snipe_extensions: number | string }, now: Date) {
   if (auction.status === "SEALED_ENDGAME") return true;
+  const start = new Date(auction.start_time);
   const end = new Date(auction.end_time);
+  const ext = Number(auction.anti_snipe_extensions || 0);
+  const originalDurationSec = (end.getTime() - start.getTime()) / 1000 - (ext * ANTI_SNIPE_SECONDS);
+  if (originalDurationSec < 120) return false;
   return end.getTime() - now.getTime() <= SEALED_BID_WINDOW_SECONDS * 1000;
 }
 
@@ -291,8 +295,9 @@ export async function getLiveAuctions() {
            sealed_phase_ends_at=end_time
        where status in ('LIVE','CLOSING')
          and end_time > now()
-         and end_time <= now() + ($1 * interval '1 second')`,
-      [SEALED_BID_WINDOW_SECONDS]
+         and end_time <= now() + ($1 * interval '1 second')
+         and extract(epoch from (end_time - start_time)) - (anti_snipe_extensions * $2) >= 120`,
+      [SEALED_BID_WINDOW_SECONDS, ANTI_SNIPE_SECONDS]
     );
 
     const auctions = await listLiveAuctions(client);
@@ -425,12 +430,19 @@ export async function placeBid(
       }
     }
 
+    const start = new Date(auction.start_time);
+    const extCount = Number(auction.anti_snipe_extensions || 0);
+    const originalDurationSec = (endTime.getTime() - start.getTime()) / 1000 - (extCount * ANTI_SNIPE_SECONDS);
+    const isSealedEligible = originalDurationSec >= 120;
     const secondsLeft = Math.floor((endTime.getTime() - now.getTime()) / 1000);
+    const antiSnipeTriggerWindow = 30;
+    const antiSnipeThreshold = isSealedEligible ? (SEALED_BID_WINDOW_SECONDS + antiSnipeTriggerWindow) : antiSnipeTriggerWindow;
+
     let nextEndTime = endTime;
     let status = auction.status;
     let ext = Number(auction.anti_snipe_extensions);
 
-    if (secondsLeft <= ANTI_SNIPE_SECONDS && ext < ANTI_SNIPE_MAX_EXTENSIONS) {
+    if (secondsLeft <= antiSnipeThreshold && ext < ANTI_SNIPE_MAX_EXTENSIONS) {
       nextEndTime = new Date(endTime.getTime() + ANTI_SNIPE_SECONDS * 1000);
       status = "CLOSING";
       ext += 1;
@@ -466,8 +478,9 @@ export async function getAuctionSnapshot(auctionId: string, userId: string) {
        where id=$1
          and status in ('LIVE','CLOSING')
          and end_time > now()
-         and end_time <= now() + ($2 * interval '1 second')`,
-      [auctionId, SEALED_BID_WINDOW_SECONDS]
+         and end_time <= now() + ($2 * interval '1 second')
+         and extract(epoch from (end_time - start_time)) - (anti_snipe_extensions * $3) >= 120`,
+      [auctionId, SEALED_BID_WINDOW_SECONDS, ANTI_SNIPE_SECONDS]
     );
 
     const auction = await client.query(

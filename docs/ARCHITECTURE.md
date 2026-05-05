@@ -42,7 +42,7 @@ Plain English:
 | Auction Fee | `7%` | Higher than trade for premium live-liquidity surface |
 | Min Bid Increment | `max($1.00, 5% of current bid)` | Prevents noisy micro-bids, improves discovery |
 | Auction Durations | `60s`, `300s`, `900s` | Supports quick, standard, extended auctions |
-| Anti-Snipe | If an open bid arrives in final `30s`, extend by `30s`, up to `6` times | Fair response window without infinite extension |
+| Anti-Snipe | If an open bid arrives in final `30s`, extend by `12s`, up to `6` times | Fair response window without infinite extension. Window is `90s-60s` for long auctions. |
 | Rarity Weights | See table below | Higher tiers allocate more weight to premium rarities |
 
 ### Rarity weights by tier
@@ -407,7 +407,7 @@ Automatic rebalancing:
 | `DRIFT_THRESHOLD` | `0.05` (5%) | Triggers rebalance when margin drifts >5% |
 | `MARGINAL_WIN_RATE_BUFFER` | `0.02` (2%) | Warning buffer above win-rate floor |
 | `MAX_MARGIN_CONCESSION` | `0.05` (5%) | Maximum margin sacrifice for win-rate adjustment |
-| `SIMULATION_RUNS` | `10,000` | Monte Carlo sample size for validation |
+| `SIMULATION_RUNS` | `10,000` | Monte Carlo sample size for validation. 10,000 runs provides strict statistical confidence for win-rate and margin validation while keeping the optimization loop execution under 1 second. |
 
 **Weight Bounds per Rarity** (min/max to prevent degenerate solutions):
 ```
@@ -556,14 +556,16 @@ B3 adds an integrity layer on top of the Part A auction transaction model. The d
 
 Auctions now use a sealed-bid endgame:
 - Normal auctions start in `LIVE` or `CLOSING` open ascending-bid mode.
-- When an auction is within `SEALED_BID_WINDOW_SECONDS` (`30s`) of `end_time`, reads and bids promote it to `SEALED_ENDGAME`.
+- When an auction is within `SEALED_BID_WINDOW_SECONDS` (`60s`) of `end_time`, reads and bids promote it to `SEALED_ENDGAME`. 60 seconds is long enough to cover typical network latency and page-reload times, but short enough to keep the blind-bidding phase tense. The sealed endgame applies to auctions with duration >= 120 seconds. 
+- For auctions eligible for the sealed phase, a 30-second "extension zone" (90s-60s remaining) precedes the sealed phase. Bids here extend the open phase by `12 seconds`.
+- Quick 60-second auctions skip the sealed phase and rely solely on a 12-second anti-snipe extension triggered during the final 30s.
 - Socket.io emits `auction:sealed:status` so existing auction rooms can switch UI mode without a page reload.
 - During `SEALED_ENDGAME`, bidders submit or replace a hidden max bid in `sealed_bids`; the public `current_bid` and open bid history no longer reveal the new max bids.
 - Funds are held for each bidder's current hidden max. Replacing a sealed bid atomically holds only the delta or releases the reduction.
 - Settlement computes a second-price result from sealed candidates plus the current open leader. The winner pays the runner-up max plus the normal increment, capped by their own max.
 
 Why this prevents endgame leakage:
-- Bots cannot observe the true final willingness-to-pay of competitors during the last 30 seconds.
+- Bots cannot observe the true final willingness-to-pay of competitors during the last 60 seconds.
 - Last-millisecond timing is less valuable because the final clearing price comes from hidden maximums, not the last visible bid.
 - The open leader is included as a sealed candidate at the visible current bid, so the transition composes with existing open-bid state.
 
@@ -573,7 +575,7 @@ The bid path enforces several rules inside the auction transaction:
 - **Minimum increment:** next bid must be at least `max($1.00, 5% of current bid)` above the current bid.
 - **Self-bidding:** the seller cannot bid on their own auction.
 - **Fat-finger confirmation:** a bid requires explicit confirmation when it is both at least `2x` the current-bid reference and at least `3x` card market value. If no market value exists, the current-bid multiple alone is used.
-- **Open-bid pacing:** Redis enforces a `1500ms` per-user cooldown per auction plus a sliding window of at most `5` open bids per `10s`.
+- **Open-bid pacing:** Redis enforces a `1500ms` per-user cooldown per auction plus a sliding window of at most `5` open bids per `10s`. The 1500ms cooldown allows sufficient time for the UI to render the previous bid state, preventing accidental self-bidding or client-side race conditions.
 - **Sealed-bid update pacing:** Redis enforces a `1000ms` per-user sealed max update cooldown.
 - **Idempotency:** open and sealed bid tables each deduplicate by `(bidder_id, idempotency_key)`.
 - **Held funds:** bid holds and releases are done before state changes commit, preventing users from overcommitting across auctions.
@@ -583,8 +585,8 @@ The bid path enforces several rules inside the auction transaction:
 Flagging happens during settlement via `runIntegrityReview`; flagged auctions are inserted into `auction_integrity_flags` with `status='OPEN'` and are not auto-cancelled.
 
 Current heuristics:
-- `REPEATED_SELLER_WINNER_PAIR`, severity `3`: same seller/winner pair has at least `3` settlements in the last `30 days`.
-- `LOW_CLOSE_WITHOUT_COMPETITION`, severity `2`: final price is below `65%` of market value and there was at most one distinct bidder.
+- `REPEATED_SELLER_WINNER_PAIR`, severity `3`: same seller/winner pair has at least `3` settlements in the last `30 days`. Three trades in 30 days between the same pair isolates organized value-transfer from normal casual overlaps.
+- `LOW_CLOSE_WITHOUT_COMPETITION`, severity `2`: final price is below `65%` of market value and there was at most one distinct bidder. The 65% market value threshold flags extreme discounts that often indicate off-platform coordination or fake liquidity.
 - `SEALED_ENDGAME_LOW_COMPETITION`, severity `1`: auction reached sealed endgame but had two or fewer bidders.
 - `MICRO_BID_LADDER`, severity `1`: one bidder placed at least `8` visible bids in the auction.
 
@@ -698,3 +700,21 @@ The dashboard keeps 30s polling and also subscribes to `analytics:dashboard:inva
 - `(purchase_id, created_at)`: purchase-level verification drilldown.
 - `(user_id, created_at)`: distinct verified users.
 - `(client_fingerprint_hash, created_at)`: anonymous session-level adoption without storing raw fingerprint strings.
+
+### Dashboard thresholds and alert levels
+
+The dashboard relies on the following thresholds to categorize system health into normal, warning, or critical states:
+
+**Economic Health Alerts:**
+- **`CRITICAL` at -8pp (percentage points) margin drift:** An 8pp drop below target margin signals a systemic pricing error that requires immediate administrative intervention to prevent platform losses.
+- **`WARN` at -5pp margin drift:** A 5pp drop provides an early warning indicator that recent market volatility is dragging down expected pack value before it becomes critical.
+- **`WARN` at +15pp margin drift:** A 15pp excess margin warns that packs are significantly less rewarding than advertised, which can severely damage player trust and retention.
+
+**User & Engagement Health:**
+- **Auction participation >= `60%`:** A 60% baseline ensures that the majority of listed items have active liquidity and the marketplace doesn't feel stagnant.
+- **Avg bidders >= `2`:** Requiring at least 2 bidders on average confirms that auctions are actually functioning as price-discovery mechanisms rather than single-bid buyouts.
+- **Drop sell-through >= `35%`:** A 35% minimum sell-through indicates healthy baseline demand for new pack inventory without requiring instant sell-outs.
+- **D1 retention >= `25%`:** A 25% day-one retention rate is the minimum required to prove the core pack-opening loop is compelling enough for users to return.
+
+**Fairness Audit:**
+- **Chi-squared `p >= 0.05 / 0.01` boundaries:** A p-value below `0.05` triggers a warning, and below `0.01` triggers a critical alert; this standard statistical boundary reliably separates acceptable random variance from systemic RNG flaws.

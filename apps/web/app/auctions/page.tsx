@@ -126,13 +126,28 @@ export default function AuctionsPage() {
     };
   }, []);
 
+  const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    const timer = setInterval(() => {
-      if (!selected?.auction?.end_time) return;
-      setCountdown(Math.max(0, Math.floor((new Date(selected.auction.end_time).getTime() - Date.now()) / 1000)));
-    }, 1000);
+    const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [selected]);
+  }, []);
+
+  useEffect(() => {
+    if (!selected?.auction?.end_time) return;
+    setCountdown(Math.max(0, Math.floor((new Date(selected.auction.end_time).getTime() - now) / 1000)));
+  }, [selected, now]);
+
+  function getAuctionMeta(a: any) {
+    const start = new Date(a.start_time).getTime();
+    const end = new Date(a.end_time).getTime();
+    const ext = Number(a.anti_snipe_extensions || 0);
+    const originalDuration = (end - start) / 1000 - (ext * 30);
+    const timeLeft = Math.max(0, Math.floor((end - now) / 1000));
+    const isEligible = originalDuration >= 120;
+    const enteringSealed = isEligible && a.status !== "SEALED_ENDGAME" && timeLeft > 60 && timeLeft <= 90;
+    const inAntiSnipe = !isEligible && timeLeft <= 30 && timeLeft > 0;
+    return { timeLeft, isEligible, enteringSealed, inAntiSnipe };
+  }
 
   async function bid(id: string, current: string) {
     setBiddingAuctionId(id);
@@ -154,12 +169,12 @@ export default function AuctionsPage() {
     } else {
       setMsg(r.ok ? (data.mode === "SEALED" ? `Hidden max bid saved at $${amount}` : `Bid placed at $${amount}`) : errorToMessage(data?.error, "Failed to place bid"));
     }
-    if (r.ok) await openRoom(id);
+    if (r.ok) await openRoom(id, true);
     setBiddingAuctionId("");
   }
 
-  async function openRoom(id: string) {
-    if (selected?.auction?.id === id) {
+  async function openRoom(id: string, forceRefresh = false) {
+    if (selected?.auction?.id === id && !forceRefresh) {
       setSelected(null);
       return;
     }
@@ -190,7 +205,12 @@ export default function AuctionsPage() {
       <div className="grid gap-4 md:grid-cols-2">
         {auctions.map((a) => (
           <div className="card space-y-2" key={a.id}>
-            <div className={`inline-block rounded px-2 py-1 text-xs font-semibold ${statusClass(a.status)}`}>{a.status}</div>
+            <div className="flex items-center justify-between">
+              <div className={`inline-block rounded px-2 py-1 text-xs font-semibold ${statusClass(a.status)}`}>{a.status}</div>
+              {getAuctionMeta(a).enteringSealed && (
+                <div className="animate-pulse text-[10px] font-bold text-fuchsia-400">ENTERING SEALED ENDGAME</div>
+              )}
+            </div>
             {a.image_url && <img src={a.image_url} alt={a.card_name} className="safe-media h-32 w-32 rounded" />}
             <p className="safe-break font-semibold">{a.card_name ?? "Card"}</p>
             <p className="safe-break text-sm text-slate-300">{a.set_name} - {a.rarity}</p>
@@ -217,7 +237,14 @@ export default function AuctionsPage() {
       </div>
       {selected?.auction && (
         <div className="card space-y-2">
-          <h2 className="text-xl font-semibold">Auction Room</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold">Auction Room</h2>
+            {getAuctionMeta(selected.auction).enteringSealed && (
+              <div className="animate-pulse rounded border border-fuchsia-500/50 bg-fuchsia-500/10 px-2 py-1 text-xs font-bold text-fuchsia-400">
+                ENTERING SEALED ENDGAME
+              </div>
+            )}
+          </div>
           <div className={`inline-block rounded px-2 py-1 text-xs font-semibold ${statusClass(selected.auction.status)}`}>{selected.auction.status}</div>
           <p className="text-sm text-slate-300">Synced at: {syncedAt || "-"}</p>
           {selected.auction.image_url && <img src={selected.auction.image_url} alt={selected.auction.card_name} className="safe-media h-40 w-40 rounded" />}
