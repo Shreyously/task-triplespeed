@@ -64,6 +64,21 @@ export default function VerifyPage() {
       expectedSelectedCardsHash: proofData.selectedCardsHash
     });
     setResult(verified);
+
+    const token = localStorage.getItem("token") || "";
+    await fetch(`${API_BASE}/provably-fair/verification-events`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {})
+      },
+      body: JSON.stringify({
+        purchaseId: targetId,
+        ok: verified.ok,
+        checks: verified.checks,
+        clientFingerprint: `${navigator.userAgent}:${navigator.language}`
+      })
+    }).catch(() => undefined);
   }
 
   return (

@@ -103,3 +103,10 @@ export function emitDropPrice(dropId: string, price: string) {
 export function emitDropStatus(dropId: string, startsAt: string, endsAt: string) {
   io?.to(`drop:${dropId}`).emit(SOCKET_EVENTS.DROP_STATUS_UPDATED, { dropId, startsAt, endsAt });
 }
+
+export function emitAnalyticsInvalidated(reason: string) {
+  io?.emit(SOCKET_EVENTS.ANALYTICS_DASHBOARD_INVALIDATED, {
+    reason,
+    generatedAt: new Date().toISOString()
+  });
+}

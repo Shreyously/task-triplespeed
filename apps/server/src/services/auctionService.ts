@@ -39,7 +39,7 @@ import { updateCardAcquisitionValue } from "../repositories/cardRepository";
 import { auctionFee } from "./feeService";
 import { creditAvailable, holdFunds, releaseFunds, spendHeld } from "./balanceService";
 import { getBalanceForUpdate } from "../repositories/balanceRepository";
-import { emitAuctionClosed, emitAuctionCreated, emitAuctionSealedStatus, getAuctionWatcherCount } from "../realtime/socket";
+import { emitAnalyticsInvalidated, emitAuctionClosed, emitAuctionCreated, emitAuctionSealedStatus, getAuctionWatcherCount } from "../realtime/socket";
 
 type BidResult =
   | {
@@ -275,6 +275,7 @@ export async function createAuctionForCard(userId: string, cardId: string, durat
       startingBid: new Decimal(auction.current_bid ?? 0).toFixed(2),
       endsAt: new Date(auction.end_time).toISOString()
     });
+    emitAnalyticsInvalidated("auction-created");
 
     return auction;
   });
@@ -394,6 +395,7 @@ export async function placeBid(
       }
 
       await upsertSealedBid(client, auctionId, userId, amount.toFixed(2), confirmHighBid, idempotencyKey);
+      emitAnalyticsInvalidated("auction-sealed-bid");
 
       return {
         accepted: true,
@@ -437,6 +439,7 @@ export async function placeBid(
     await updateAuctionOpenBidState(client, auctionId, amount.toFixed(2), userId, nextEndTime, ext, status);
     await insertBid(client, auctionId, userId, amount.toFixed(2), idempotencyKey);
     await createLedger(client, userId, "BID_HOLD", amount.toFixed(2), auction.id, { phase: "OPEN" });
+    emitAnalyticsInvalidated("auction-open-bid");
 
     return {
       accepted: true,
@@ -626,6 +629,7 @@ export async function settlementTick(platformUserId: string) {
       }
 
       emitAuctionClosed(auction.id, { auctionId: auction.id, status: "SETTLED", settlement: settlementData, sellerId: auction.seller_id });
+      emitAnalyticsInvalidated("auction-settled");
     }
 
     return settledIds;

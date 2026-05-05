@@ -88,6 +88,82 @@ export interface AuctionIntegrityFlagSummary {
   bidderCount: number;
 }
 
+export interface AnalyticsAlert {
+  level: "INFO" | "WARN" | "CRITICAL";
+  code: string;
+  message: string;
+  tier?: string;
+  value?: number;
+}
+
+export interface FraudHealthData {
+  windowHours: number;
+  totalProtectedRequests: number;
+  blockedRequests: number;
+  blockRate: number;
+  degradedOpenCount: number;
+  degradedClosedCount: number;
+  rateLimitEffectiveness: number;
+  topBlockedBucket: string | null;
+  botThrottleCount: number;
+  botBlockCount: number;
+  highRiskAccountCount: number;
+  flaggedAccounts: Array<{
+    userId: string | null;
+    recentEvents: number;
+    maxScore: number;
+    latestAction: string;
+    latestSeenAt: string;
+  }>;
+}
+
+export interface EconomicHealthTier {
+  tier: string;
+  salesCount24h: number;
+  revenue24h: string;
+  realizedCogs24h: string;
+  realizedMargin24h: number | null;
+  targetMargin: number | null;
+  marginDeltaFromTarget: number | null;
+}
+
+export interface EconomicHealthData {
+  tiers: EconomicHealthTier[];
+  trailingRevenue24h: string;
+  projectedRevenueDaily: string;
+  projectedRevenue30d: string;
+}
+
+export interface FairnessAuditData {
+  sampleSize: number;
+  statistic: number | null;
+  pValue: number | null;
+  degreesOfFreedom: number;
+  significance: "PASS" | "WATCH" | "FAIL" | "INSUFFICIENT_SAMPLE";
+  observedExpectedByRarity: Array<{
+    rarity: string;
+    observed: number;
+    expected: number;
+  }>;
+  verificationUsers: number;
+  verificationSessions: number;
+}
+
+export interface UserHealthData {
+  status: "healthy" | "watch" | "unhealthy";
+  auctionParticipationRate: number;
+  averageBiddersPerAuction: number;
+  bidPerAuction: number;
+  packsBought24h: number;
+  uniquePackBuyers24h: number;
+  liveDropSellThrough: number;
+  listingsCreated24h: number;
+  tradesCompleted24h: number;
+  listingConversionRate24h: number;
+  d1Retention: number;
+  d7Retention: number;
+}
+
 export interface AnalyticsDashboardData {
   revenue: RevenueBreakdown;
   evAnalysis: PackEVAnalysis[];
@@ -96,5 +172,10 @@ export interface AnalyticsDashboardData {
   marketStats: MarketStats[];
   auctionIntegrity: AuctionIntegrityMetrics;
   flaggedAuctions: AuctionIntegrityFlagSummary[];
+  fraudHealth: FraudHealthData;
+  economicHealth: EconomicHealthData;
+  fairnessAudit: FairnessAuditData;
+  userHealth: UserHealthData;
+  alerts: AnalyticsAlert[];
   generatedAt: string;
 }

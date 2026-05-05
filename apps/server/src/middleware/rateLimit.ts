@@ -1,9 +1,12 @@
 import { Request, Response, NextFunction } from "express";
+import { createHash } from "crypto";
 import { checkRateLimits, type RouteRateLimitPolicy } from "../services/rateLimitService";
 import { botDetector } from "../services/botDetectionService";
 import { fairnessQueue } from "../services/fairnessQueueService";
 import { ACCOUNT_LIMITS, BOT_DETECTION, FAIRNESS_CONFIG } from "../config/antibot";
 import { pool } from "../db/pool";
+import { insertBotActivityEvent, insertRateLimitEvent } from "../repositories/analyticsRepository";
+import { emitAnalyticsInvalidated } from "../realtime/socket";
 
 declare global {
   namespace Express {
@@ -25,6 +28,10 @@ export function extractClientIP(req: Request): string {
   return rawIp.replace('::ffff:', '');
 }
 
+function hashValue(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 export function rateLimitMiddleware(policy: RouteRateLimitPolicy) {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -34,6 +41,29 @@ export function rateLimitMiddleware(policy: RouteRateLimitPolicy) {
       const result = await checkRateLimits(userId, ip, policy, {
         botScore: req.botScore,
       });
+
+      try {
+        const client = await pool.connect();
+        try {
+          await insertRateLimitEvent(client, {
+            userId: req.user?.userId ?? null,
+            ipHash: hashValue(ip),
+            routeType: policy.type,
+            accessPolicy: policy.access,
+            allowed: result.allowed,
+            degraded: result.degraded,
+            failureMode: result.failureMode,
+            blockedBy: result.blockedBy ?? null,
+            retryAfterSeconds: result.retryAfter ?? null,
+            requestLimit: result.limit,
+            remaining: result.remaining
+          });
+        } finally {
+          client.release();
+        }
+      } catch (logError) {
+        console.warn("Failed to persist rate limit event", logError);
+      }
 
       res.setHeader('X-RateLimit-Limit', result.limit.toString());
       res.setHeader('X-RateLimit-Remaining', result.remaining.toString());
@@ -45,6 +75,7 @@ export function rateLimitMiddleware(policy: RouteRateLimitPolicy) {
       }
 
       if (!result.allowed) {
+        emitAnalyticsInvalidated("rate-limit-block");
         res.setHeader('Retry-After', result.retryAfter?.toString() || '60');
         return res.status(result.failureMode === 'degraded-closed' ? 503 : 429).json({
           error: result.failureMode === 'degraded-closed' ? 'Rate limiting temporarily unavailable' : 'Too many requests',
@@ -87,10 +118,35 @@ export async function botDetectionMiddleware(req: Request, res: Response, next: 
       timestamp: Date.now(),
     });
 
+    if (
+      result.action === "throttle" ||
+      result.action === "block" ||
+      result.score >= BOT_DETECTION.botScoreThreshold * 0.5
+    ) {
+      try {
+        const client = await pool.connect();
+        try {
+          await insertBotActivityEvent(client, {
+            userId,
+            ipHash: hashValue(ip),
+            userAgentHash: hashValue(userAgent || "unknown"),
+            score: result.score,
+            action: result.action,
+            reasons: result.reasons
+          });
+        } finally {
+          client.release();
+        }
+      } catch (logError) {
+        console.warn("Failed to persist bot activity event", logError);
+      }
+    }
+
     req.botScore = result.score;
     req.forceFairnessMode = result.action === 'throttle';
 
     if (result.action === 'block') {
+      emitAnalyticsInvalidated("bot-block");
       await botDetector.flagSuspiciousActivity(userId, ip, `High bot score: ${result.score.toFixed(2)}`);
 
       return res.status(403).json({
@@ -98,6 +154,10 @@ export async function botDetectionMiddleware(req: Request, res: Response, next: 
         reason: 'bot_detected',
         message: 'Your request pattern suggests automated behavior. Please contact support if this is an error.',
       });
+    }
+
+    if (result.action === "throttle") {
+      emitAnalyticsInvalidated("bot-throttle");
     }
 
     if (result.score > BOT_DETECTION.throttleScoreThreshold) {

@@ -11,6 +11,7 @@ export const SOCKET_EVENTS = {
   DROP_PRICE_UPDATED: "drop:price:updated",
   DROP_STATUS_UPDATED: "drop:status:updated",
   LISTING_CREATED: "listing:created",
+  ANALYTICS_DASHBOARD_INVALIDATED: "analytics:dashboard:invalidated",
   JOIN_DROP: "join:drop",
   JOIN_USER: "join:user",
   JOIN_AUCTION: "join:auction"

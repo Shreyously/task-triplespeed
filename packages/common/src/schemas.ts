@@ -58,3 +58,10 @@ export const rebalanceEconomicsSchema = z.object({
   dryRun: z.boolean().optional(),
   tier: tierEnum.optional()
 });
+
+export const fairnessVerificationEventSchema = z.object({
+  purchaseId: z.string().uuid(),
+  ok: z.boolean(),
+  checks: z.record(z.string(), z.boolean()),
+  clientFingerprint: z.string().min(8).max(256).optional()
+});

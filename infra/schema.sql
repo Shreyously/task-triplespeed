@@ -289,3 +289,76 @@ create index if not exists ix_pack_opening_audit_events_created_id
 create index if not exists ix_pack_opening_audit_events_purchase_id
   on pack_opening_audit_events (purchase_id);
 
+create table if not exists rate_limit_events (
+  id bigserial primary key,
+  user_id uuid,
+  ip_hash text,
+  route_type text not null,
+  access_policy text not null,
+  allowed boolean not null,
+  degraded boolean not null default false,
+  failure_mode text not null,
+  blocked_by text,
+  retry_after_seconds int,
+  request_limit int not null,
+  remaining int not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists ix_rate_limit_events_created_at
+  on rate_limit_events (created_at);
+
+create index if not exists ix_rate_limit_events_route_created
+  on rate_limit_events (route_type, created_at);
+
+create index if not exists ix_rate_limit_events_allowed_created
+  on rate_limit_events (allowed, created_at);
+
+create index if not exists ix_rate_limit_events_blocked_by_created
+  on rate_limit_events (blocked_by, created_at);
+
+create table if not exists bot_activity_events (
+  id bigserial primary key,
+  user_id uuid,
+  ip_hash text,
+  user_agent_hash text,
+  score numeric(5,4) not null,
+  action text not null,
+  reasons jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists ix_bot_activity_events_created_at
+  on bot_activity_events (created_at);
+
+create index if not exists ix_bot_activity_events_user_created
+  on bot_activity_events (user_id, created_at);
+
+create index if not exists ix_bot_activity_events_action_created
+  on bot_activity_events (action, created_at);
+
+create index if not exists ix_bot_activity_events_score_created
+  on bot_activity_events (score, created_at);
+
+create table if not exists fairness_verification_events (
+  id bigserial primary key,
+  purchase_id uuid not null references pack_purchases(id),
+  user_id uuid,
+  client_fingerprint_hash text,
+  ok boolean not null,
+  checks jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists ix_fairness_verification_events_created_at
+  on fairness_verification_events (created_at);
+
+create index if not exists ix_fairness_verification_events_purchase_created
+  on fairness_verification_events (purchase_id, created_at);
+
+create index if not exists ix_fairness_verification_events_user_created
+  on fairness_verification_events (user_id, created_at);
+
+create index if not exists ix_fairness_verification_events_fingerprint_created
+  on fairness_verification_events (client_fingerprint_hash, created_at);
+

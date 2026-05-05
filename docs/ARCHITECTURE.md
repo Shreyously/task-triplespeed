@@ -504,3 +504,38 @@ Indexes introduced for B4:
 - `pack_opening_audit_events`: unique `event_hash`, `(created_at,id)` for pagination, `(purchase_id)` for drill-down.
 
 These logs are intentionally shaped so a later metrics pipeline or dashboard can consume them without changing the core enforcement flow again.
+
+---
+
+## 11) Part B5 platform health dashboard
+
+The admin dashboard now extends beyond economics and reports four operational areas on `GET /analytics/dashboard`:
+
+- Fraud health: rate-limit block behavior, degraded limiter mode counts, bot throttle/block activity, and high-risk account queue.
+- Economic health: rolling 24h realized margin by tier (actual vs active target), plus revenue projections and margin alerts.
+- Fairness audit: rarity distribution goodness-of-fit against advertised weights using a chi-squared test (7d window), with p-value and significance state.
+- User health: auction participation, drop engagement, marketplace conversion, and D1/D7 retention with a composite health state.
+
+### Real-time behavior
+
+The dashboard keeps 30s polling and also subscribes to `analytics:dashboard:invalidated` Socket.io events. Core transactional flows emit invalidations after pack purchases, listing actions, auction actions, bot/rate-limit enforcement, and fairness verification events.
+
+### New observability tables and index justification
+
+`rate_limit_events`
+- `created_at`: primary time-window scans for 24h/7d dashboards.
+- `(route_type, created_at)`: route-level limiter effectiveness queries.
+- `(allowed, created_at)`: fast blocked vs allowed aggregation.
+- `(blocked_by, created_at)`: top blocked bucket ranking.
+
+`bot_activity_events`
+- `created_at`: rolling fraud trend window.
+- `(user_id, created_at)`: flagged-account queue and recent user drilldown.
+- `(action, created_at)`: throttle/block trend splits.
+- `(score, created_at)`: high-score screening.
+
+`fairness_verification_events`
+- `created_at`: verification adoption trend windows.
+- `(purchase_id, created_at)`: purchase-level verification drilldown.
+- `(user_id, created_at)`: distinct verified users.
+- `(client_fingerprint_hash, created_at)`: anonymous session-level adoption without storing raw fingerprint strings.

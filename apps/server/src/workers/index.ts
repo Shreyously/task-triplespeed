@@ -6,6 +6,10 @@ import { syncDrops } from "../services/packService";
 import { recordPortfolioSnapshots } from "../services/collectionService";
 import { rebalanceIfNeeded } from "../services/packEconomicsService";
 import { getAllActiveConfigs } from "../repositories/packConfigRepository";
+import {
+  getUserHealth,
+  cleanupObservabilityTables
+} from "../repositories/analyticsRepository";
 import { pool } from "../db/pool";
 import { PACK_ECONOMICS } from "../config/packEconomics";
 import { fairnessQueue } from "../services/fairnessQueueService";
@@ -81,6 +85,20 @@ export async function startWorkers() {
       console.error("fairness queue monitor error", e);
     }
   }, 10000);
+
+  setInterval(async () => {
+    try {
+      const client = await pool.connect();
+      try {
+        const stats = await cleanupObservabilityTables(client);
+        console.log(`[Cleanup] Pruned ${stats.rateLimitDeleted} rate limit events and ${stats.botActivityDeleted} bot activity events.`);
+      } finally {
+        client.release();
+      }
+    } catch (e) {
+      console.error("observability cleanup worker error", e);
+    }
+  }, 60 * 60 * 1000); // Every hour
 }
 
 async function monitorFairnessQueues() {

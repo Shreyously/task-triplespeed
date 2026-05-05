@@ -4,7 +4,7 @@ import { ensureCardMarketState, getCardForUpdate, getCardMarketStateForUpdate, u
 import { createListing, getListingForUpdate, listActiveListings, markListingSold } from "../repositories/listingRepository";
 import { createLedger } from "../repositories/ledgerRepository";
 import { updateCardAcquisitionValue } from "../repositories/cardRepository";
-import { emitListingSold, emitListingCreated } from "../realtime/socket";
+import { emitAnalyticsInvalidated, emitListingSold, emitListingCreated } from "../realtime/socket";
 import { debitAvailable, creditAvailable } from "./balanceService";
 import { tradeFee } from "./feeService";
 
@@ -27,6 +27,7 @@ export async function listCard(userId: string, cardId: string, priceStr: string)
       image_url: card.image_url,
       market_value: card.market_value
     });
+    emitAnalyticsInvalidated("listing-created");
 
     return listing;
   });
@@ -98,6 +99,7 @@ export async function buyListing(userId: string, listingId: string, idempotencyK
         sellerId: listing.seller_id,
         price: gross.toFixed(2)
       });
+      emitAnalyticsInvalidated("listing-sold");
 
       return { listingId, buyerId: userId, gross: gross.toFixed(2), fee: fee.toFixed(2) };
     });
