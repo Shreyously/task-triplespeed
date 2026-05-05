@@ -49,7 +49,7 @@ describe("Auction integrity", () => {
     const bidder = await signupUser(app, "sealed-threshold-bidder");
 
     await withClient((client) =>
-      client.query("update auctions set end_time = now() + interval '5 seconds' where id=$1", [auctionId])
+      client.query("update auctions set start_time = now() - interval '300 seconds', end_time = now() + interval '5 seconds' where id=$1", [auctionId])
     );
 
     const snapshot = await request(app)
@@ -67,7 +67,7 @@ describe("Auction integrity", () => {
     const bob = await signupUser(app, "sealed-bob");
 
     await withClient((client) =>
-      client.query("update auctions set end_time = now() + interval '5 seconds' where id=$1", [auctionId])
+      client.query("update auctions set start_time = now() - interval '300 seconds', end_time = now() + interval '5 seconds' where id=$1", [auctionId])
     );
 
     const aliceBid = await request(app)
@@ -128,7 +128,7 @@ describe("Auction integrity", () => {
     const bidder = await signupUser(app, "sealed-replace");
 
     await withClient((client) =>
-      client.query("update auctions set end_time = now() + interval '5 seconds' where id=$1", [auctionId])
+      client.query("update auctions set start_time = now() - interval '300 seconds', end_time = now() + interval '5 seconds' where id=$1", [auctionId])
     );
 
     const firstBid = await request(app)
