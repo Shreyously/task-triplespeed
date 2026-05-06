@@ -150,11 +150,16 @@ export async function simulateTier(
     rarityHitRates[rarity] = count / totalCards;
   }
 
-  // Feasibility
+  // Feasibility (respects tier-specific overrides)
+  const tierTargets = PACK_ECONOMICS.TIER_TARGETS[tier] || {
+    targetMargin: PACK_ECONOMICS.TARGET_MARGIN,
+    winRateFloor: PACK_ECONOMICS.WIN_RATE_FLOOR,
+  };
+
   let feasibility: FeasibilityStatus;
-  if (margin < PACK_ECONOMICS.TARGET_MARGIN || winRate < PACK_ECONOMICS.WIN_RATE_FLOOR) {
+  if (margin < tierTargets.targetMargin || winRate < tierTargets.winRateFloor) {
     feasibility = "INFEASIBLE";
-  } else if (winRate < PACK_ECONOMICS.WIN_RATE_FLOOR + PACK_ECONOMICS.MARGINAL_WIN_RATE_BUFFER) {
+  } else if (winRate < tierTargets.winRateFloor + PACK_ECONOMICS.MARGINAL_WIN_RATE_BUFFER) {
     feasibility = "MARGINAL";
   } else {
     feasibility = "FEASIBLE";
