@@ -483,18 +483,28 @@ export async function getEconomicHealth(client: Pool | PoolClient): Promise<Econ
   const tierRows = await client.query(`
     select
       d.tier,
-      count(distinct pp.id)::int as sales_count_24h,
-      coalesce(sum(pp.price_paid), 0) as revenue_24h,
-      coalesce(sum(c.acquisition_value), 0) as cogs_24h,
+      coalesce(stats.sales_count, 0) as sales_count_24h,
+      coalesce(stats.revenue, 0) as revenue_24h,
+      coalesce(stats.cogs, 0) as cogs_24h,
       pcv.target_margin
     from drops d
-    left join pack_purchases pp
-      on pp.drop_id = d.id
-      and pp.created_at >= now() - interval '24 hours'
-    left join cards c on c.purchase_id = pp.id
+    left join (
+      select
+        pp.drop_id,
+        count(pp.id)::int as sales_count,
+        sum(pp.price_paid) as revenue,
+        sum(cogs_agg.total_cogs) as cogs
+      from pack_purchases pp
+      left join (
+        select purchase_id, sum(acquisition_value) as total_cogs
+        from cards
+        group by purchase_id
+      ) cogs_agg on cogs_agg.purchase_id = pp.id
+      where pp.created_at >= now() - interval '24 hours'
+      group by pp.drop_id
+    ) stats on stats.drop_id = d.id
     left join pack_config_versions pcv
       on pcv.tier = d.tier and pcv.is_active = true
-    group by d.tier, pcv.target_margin
     order by d.tier
   `);
 
